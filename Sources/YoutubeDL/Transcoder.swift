@@ -11,8 +11,8 @@ import avfilter
 import swscale
 import swresample
 
-class Transcoder {
-    var isCancelled = false
+open class Transcoder {
+    open var isCancelled = false
     
     var progressBlock: ((Double) -> Void)?
     

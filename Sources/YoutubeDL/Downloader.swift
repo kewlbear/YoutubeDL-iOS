@@ -9,12 +9,16 @@ import UIKit
 import AVFoundation
 import Photos
 
-class Downloader: NSObject {
+public enum NotificationRequestIdentifier: String {
+    case transcode
+}
 
-    enum Kind: String {
+open class Downloader: NSObject {
+
+    public enum Kind: String {
         case complete, videoOnly, audioOnly, otherVideo
         
-        var url: URL {
+        public var url: URL {
             do {
                 return try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                     .appendingPathComponent("video")
@@ -29,9 +33,9 @@ class Downloader: NSObject {
         }
     }
     
-    static let shared = Downloader(backgroundURLSessionIdentifier: "YoutubeDL")
+    public static let shared = Downloader(backgroundURLSessionIdentifier: "YoutubeDL")
     
-    var session: URLSession = URLSession.shared
+    open var session: URLSession = URLSession.shared
     
     let decimalFormatter = NumberFormatter()
     
@@ -41,13 +45,13 @@ class Downloader: NSObject {
     
     var t = ProcessInfo.processInfo.systemUptime
     
-    var t0 = ProcessInfo.processInfo.systemUptime
+    open var t0 = ProcessInfo.processInfo.systemUptime
     
     var topViewController: UIViewController? {
         (UIApplication.shared.keyWindow?.rootViewController as? UINavigationController)?.topViewController
     }
     
-    var transcoder: Transcoder?
+    open var transcoder: Transcoder?
     
     init(backgroundURLSessionIdentifier: String?) {
         super.init()
@@ -83,7 +87,7 @@ class Downloader: NSObject {
         }
     }
     
-    func download(request: URLRequest, kind: Kind) -> URLSessionDownloadTask {
+    open func download(request: URLRequest, kind: Kind) -> URLSessionDownloadTask {
         removeItem(at: kind.url)
 
         let task = session.downloadTask(with: request)
@@ -155,7 +159,7 @@ class Downloader: NSObject {
         }
     }
     
-    func transcode() {
+    open func transcode() {
         DispatchQueue.main.async {
             guard UIApplication.shared.applicationState == .active else {
 //                notify(body: "앱을 실행하고 트랜스코딩을 하세요.", identifier: NotificationRequestIdentifier.transcode.rawValue)
@@ -232,17 +236,17 @@ class Downloader: NSObject {
 }
 
 extension Downloader: URLSessionDelegate {
-    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+    public func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
         print(#function, session, error ?? "no error")
     }
     
-    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+    public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         print(#function, session)
     }
 }
 
 extension Downloader: URLSessionTaskDelegate {
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error = error {
             print(#function, session, task, error)
         }
@@ -257,7 +261,7 @@ extension Downloader: URLSessionDownloadDelegate {
         }
         
         PHPhotoLibrary.shared().performChanges({
-            let changeRequest = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+            _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
             //                            changeRequest.contentEditingOutput = output
         }) { (success, error) in
             print(#function, success, error ?? "")
@@ -299,7 +303,7 @@ extension Downloader: URLSessionDownloadDelegate {
         }
     }
     
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         let (_, range, size) = (downloadTask.response as? HTTPURLResponse)?.contentRange
             ?? (nil, -1 ..< -1, -1)
 //        print(#function, session, location)
@@ -363,7 +367,7 @@ extension Downloader: URLSessionDownloadDelegate {
         }
     }
     
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         let t = ProcessInfo.processInfo.systemUptime
         guard t - self.t > 0.9 else {
             return
