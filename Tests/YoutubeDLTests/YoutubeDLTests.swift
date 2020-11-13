@@ -6,7 +6,7 @@ final class YoutubeDLTests: XCTestCase {
         // This is an example of a functional test case.
         // Use XCTAssert and related functions to verify your tests produce the correct
         // results.
-        XCTAssertEqual(YoutubeDL().text, "Hello, World!")
+        YoutubeDL()
     }
 
     static var allTests = [

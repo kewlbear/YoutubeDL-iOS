@@ -1,0 +1,34 @@
+{
+  "object": {
+    "pins": [
+      {
+        "package": "Csqlite3",
+        "repositoryURL": "https://github.com/rderik/Csqlite3",
+        "state": {
+          "branch": "master",
+          "revision": "0bdc41ed4a038be74c2eba24dc957aa33d493396",
+          "version": null
+        }
+      },
+      {
+        "package": "FFmpeg-iOS",
+        "repositoryURL": "https://github.com/kewlbear/FFmpeg-iOS.git",
+        "state": {
+          "branch": "main",
+          "revision": "a3b82405101de7420c12fe94415a0f0ceedfe114",
+          "version": null
+        }
+      },
+      {
+        "package": "Python-iOS",
+        "repositoryURL": "https://github.com/kewlbear/Python-iOS.git",
+        "state": {
+          "branch": "main",
+          "revision": "abe480925415e205f1e2b942b491b73cf93c6ed1",
+          "version": null
+        }
+      }
+    ]
+  },
+  "version": 1
+}
