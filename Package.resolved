@@ -20,11 +20,47 @@
         }
       },
       {
+        "package": "LoggerKit",
+        "repositoryURL": "https://github.com/pvieito/LoggerKit.git",
+        "state": {
+          "branch": "master",
+          "revision": "835b41248dbe474eb33dac2c1ef1376dea7dc11d",
+          "version": null
+        }
+      },
+      {
         "package": "Python-iOS",
         "repositoryURL": "https://github.com/kewlbear/Python-iOS.git",
         "state": {
           "branch": "main",
           "revision": "abe480925415e205f1e2b942b491b73cf93c6ed1",
+          "version": null
+        }
+      },
+      {
+        "package": "PythonKit",
+        "repositoryURL": "https://github.com/kewlbear/PythonKit.git",
+        "state": {
+          "branch": "master",
+          "revision": "772fefc079e0ed4f3432ecad70aaee1ec7d6f1c3",
+          "version": null
+        }
+      },
+      {
+        "package": "Rainbow",
+        "repositoryURL": "https://github.com/onevcat/Rainbow",
+        "state": {
+          "branch": null,
+          "revision": "626c3d4b6b55354b4af3aa309f998fae9b31a3d9",
+          "version": "3.2.0"
+        }
+      },
+      {
+        "package": "swift-argument-parser",
+        "repositoryURL": "https://github.com/apple/swift-argument-parser",
+        "state": {
+          "branch": "main",
+          "revision": "53555a04503c175eaffcf587e4b8c380a7c41a5c",
           "version": null
         }
       }
