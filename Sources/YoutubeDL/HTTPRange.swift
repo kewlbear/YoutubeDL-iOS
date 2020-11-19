@@ -30,9 +30,7 @@ extension HTTPURLResponse {
         if #available(iOS 13.0, *) {
             contentRange = value(forHTTPHeaderField: "Content-Range")
         } else {
-            // Fallback on earlier versions
-            assertionFailure()
-            return nil
+            contentRange = allHeaderFields["Content-Range"] as? String
         }
         print(#function, contentRange ?? "no Content-Range?")
         
