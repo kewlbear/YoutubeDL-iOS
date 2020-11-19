@@ -74,13 +74,48 @@ public let defaultOptions: PythonObject = [
 ]
 
 open class YoutubeDL: NSObject {
-    let youtubeDL: PythonObject
+    public static var shouldDownloadPythonModule: Bool {
+        do {
+            _ = try YoutubeDL()
+            return false
+        }
+        catch {
+            guard let error = error as? PythonError,
+                  case let .exception(e, _) = error,
+                  e.description == "No module named 'youtube_dl'" else { // FIXME: better way?
+                return false
+            }
+            return true
+        }
+    }
+    
+    public static let latestDownloadURL = URL(string: "https://yt-dl.org/downloads/latest/youtube-dl")!
+    
+    public static var pythonModuleURL: URL = {
+        guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+                .appendingPathComponent("io.github.kewlbear.youtubedl-ios") else { fatalError() }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+        }
+        catch {
+            fatalError(error.localizedDescription)
+        }
+        return directory.appendingPathComponent("youtube_dl")
+    }()
+    
+    internal let pythonObject: PythonObject
 
-    let options: PythonObject
+    internal let options: PythonObject
     
     public init(options: PythonObject = defaultOptions) throws {
-        let youtube_dl = try Python.attemptImport("youtube_dl")
-        youtubeDL = youtube_dl.YoutubeDL(options)
+        let sys = try Python.attemptImport("sys")
+        if !(Array(sys.path) ?? []).contains(Self.pythonModuleURL.path) {
+            sys.path.insert(1, Self.pythonModuleURL.path)
+        }
+        
+        let pythonModule = try Python.attemptImport("youtube_dl")
+        pythonObject = pythonModule.YoutubeDL(options)
+        
         self.options = options
     }
     
@@ -97,9 +132,9 @@ open class YoutubeDL: NSObject {
     
     open func extractInfo(url: URL) throws -> ([Format], Info?) {
         print(#function, url)
-        let info = try youtubeDL.extract_info.throwing.dynamicallyCall(withKeywordArguments: ["": url.absoluteString, "download": false, "process": true])
+        let info = try pythonObject.extract_info.throwing.dynamicallyCall(withKeywordArguments: ["": url.absoluteString, "download": false, "process": true])
         
-        let format_selector = youtubeDL.build_format_selector(options["format"])
+        let format_selector = pythonObject.build_format_selector(options["format"])
         let formats_to_download = format_selector(info)
         var formats: [Format] = []
         for format in formats_to_download {
@@ -108,5 +143,32 @@ open class YoutubeDL: NSObject {
         }
         
         return (formats, Info(info: info))
+    }
+    
+    public static func downloadPythonModule(from url: URL = latestDownloadURL, completionHandler: @escaping (Error?) -> Void) {
+        let task = URLSession.shared.downloadTask(with: url) { (location, response, error) in
+            guard let location = location else {
+                completionHandler(error)
+                return
+            }
+            do {
+                do {
+                    try FileManager.default.removeItem(at: pythonModuleURL)
+                }
+                catch {
+                    print(error)
+                }
+                
+                try FileManager.default.moveItem(at: location, to: pythonModuleURL)
+
+                completionHandler(nil)
+            }
+            catch {
+                print(#function, error)
+                completionHandler(error)
+            }
+        }
+        
+        task.resume()
     }
 }
