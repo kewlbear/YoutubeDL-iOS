@@ -127,7 +127,7 @@ open class Downloader: NSObject {
                   videoAsset.tracks(withMediaType: .video),
                   audioAsset.tracks(withMediaType: .audio))
             DispatchQueue.main.async {
-                self.topViewController?.navigationItem.title = "Merge failed"
+                self.topViewController?.navigationItem.title = NSLocalizedString("Merge failed", comment: "Message")
             }
             return
         }
@@ -161,7 +161,7 @@ open class Downloader: NSObject {
         session.outputFileType = .mp4
         print(#function, "merging...")
         DispatchQueue.main.async {
-            self.topViewController?.navigationItem.title = "Merging..."
+            self.topViewController?.navigationItem.title = NSLocalizedString("Merging...", comment: "Message") 
         }
         session.exportAsynchronously {
             print(#function, "finished merge", session.status.rawValue)
@@ -180,12 +180,12 @@ open class Downloader: NSObject {
     open func transcode() {
         DispatchQueue.main.async {
             guard UIApplication.shared.applicationState == .active else {
-                notify(body: "앱을 실행하고 트랜스코딩을 하세요.", identifier: NotificationRequestIdentifier.transcode.rawValue)
+                notify(body: NSLocalizedString("AskTranscode", comment: "Notification body"), identifier: NotificationRequestIdentifier.transcode.rawValue)
                 return
             }
             
-            let alert = UIAlertController(title: nil, message: "트랜스코딩이 끝날 때까지 다른 앱으로 전환하지 마세요.", preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "확인", style: .default, handler: nil))
+            let alert = UIAlertController(title: nil, message: NSLocalizedString("DoNotSwitch", comment: "Alert message"), preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: "Action"), style: .default, handler: nil))
             self.topViewController?.present(alert, animated: true, completion: nil)
         }
         
@@ -207,7 +207,7 @@ open class Downloader: NSObject {
         }
 
         DispatchQueue.main.async {
-            self.topViewController?.navigationItem.title = "Transcoding..."
+            self.topViewController?.navigationItem.title = NSLocalizedString("Transcoding...", comment: "Message") 
         }
 
         let t0 = ProcessInfo.processInfo.systemUptime
@@ -227,8 +227,10 @@ open class Downloader: NSObject {
                     guard ETA.isFinite else { return }
 
                     DispatchQueue.main.async {
-                        self.topViewController?.navigationItem.title =
-                            "Transcoding \(self.percentFormatter.string(from: NSNumber(value: progress)) ?? "?") ETA \(self.dateComponentsFormatter.string(from: ETA) ?? "?")"
+                        self.topViewController?.navigationItem.title
+                            = String(format: NSLocalizedString("TranscodeProgressFormat", comment: "Message"),
+                                     self.percentFormatter.string(from: NSNumber(value: progress)) ?? "?",
+                                     self.dateComponentsFormatter.string(from: ETA) ?? "?")
                     }
                 }
 
@@ -253,7 +255,7 @@ open class Downloader: NSObject {
 
         print(#function, ret ?? "nil?", "took", dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
 
-        notify(body: "트랜스코딩 완료")
+        notify(body: NSLocalizedString("FinishedTranscoding", comment: "Notification body"))
 
         tryMerge()
     }
@@ -284,7 +286,7 @@ extension Downloader: URLSessionDownloadDelegate {
     
     fileprivate func export(_ url: URL) {
         DispatchQueue.main.async {
-            self.topViewController?.navigationItem.title = "Exporting..."
+            self.topViewController?.navigationItem.title = NSLocalizedString("Exporting...", comment: "Message") 
         }
         
         PHPhotoLibrary.shared().performChanges({
@@ -293,9 +295,9 @@ extension Downloader: URLSessionDownloadDelegate {
         }) { (success, error) in
             print(#function, success, error ?? "")
             
-            notify(body: "Download complete!")
+            notify(body: NSLocalizedString("Download complete!", comment: "Notification body"))
             DispatchQueue.main.async {
-                self.topViewController?.navigationItem.title = "Finished"
+                self.topViewController?.navigationItem.title = NSLocalizedString("Finished", comment: "Message") 
             }
         }
     }
@@ -359,7 +361,7 @@ extension Downloader: URLSessionDownloadDelegate {
             }
             
             DispatchQueue.main.async {
-                self.topViewController?.navigationItem.prompt = "Download finished"
+                self.topViewController?.navigationItem.prompt = NSLocalizedString("Download finished", comment: "Message") 
             }
             
             session.getTasksWithCompletionHandler { (_, _, tasks) in
@@ -408,7 +410,13 @@ extension Downloader: URLSessionDownloadDelegate {
         
         let percent = percentFormatter.string(from: NSNumber(value: Double(count) / Double(size)))
         DispatchQueue.main.async {
-            self.topViewController?.navigationItem.prompt = "\(percent ?? "?%") of \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) at \(ByteCountFormatter.string(fromByteCount: Int64(bytesPerSec), countStyle: .file))/s ETA \(self.dateComponentsFormatter.string(from: remain) ?? "?") \(downloadTask.taskDescription ?? "no description?")"
+            self.topViewController?.navigationItem.prompt
+                = String(format: NSLocalizedString("DownloadProgressFormat", comment: "Message"),
+                         percent ?? "?%",
+                         ByteCountFormatter.string(fromByteCount: size, countStyle: .file),
+                         ByteCountFormatter.string(fromByteCount: Int64(bytesPerSec), countStyle: .file),
+                         self.dateComponentsFormatter.string(from: remain) ?? "?",
+                         downloadTask.taskDescription ?? "no description?") 
         }
     }
 }
