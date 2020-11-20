@@ -82,7 +82,7 @@ public struct Format: CustomStringConvertible {
     public var isVideoOnly: Bool { self.acodec == "none" }
     
     public var description: String {
-        "\(format["format"] ?? "no format?") \(format["ext"] ?? "no ext?") \(format["filesize"] ?? "no size?")"
+        "\(format["format"] ?? "no format?") \(format["ext"] ?? "no ext?") \(format["vcodec"] ?? "no vcodec?") \(format["filesize"] ?? "no size?")"
     }
     
     public subscript(dynamicMember key: String) -> String? {

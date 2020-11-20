@@ -30,6 +30,7 @@ public enum NotificationRequestIdentifier: String {
     case transcode
 }
 
+@available(iOS 12.0, *)
 open class Downloader: NSObject {
 
     public enum Kind: String {
@@ -40,7 +41,7 @@ open class Downloader: NSObject {
                 return try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                     .appendingPathComponent("video")
                     .appendingPathExtension(self != .audioOnly
-                                                ? (self == .otherVideo ? "webm" : "mp4")
+                                                ? (self == .otherVideo ? "other" : "mp4")
                                                 : "m4a")
             }
             catch {
@@ -179,7 +180,7 @@ open class Downloader: NSObject {
     open func transcode() {
         DispatchQueue.main.async {
             guard UIApplication.shared.applicationState == .active else {
-//                notify(body: "앱을 실행하고 트랜스코딩을 하세요.", identifier: NotificationRequestIdentifier.transcode.rawValue)
+                notify(body: "앱을 실행하고 트랜스코딩을 하세요.", identifier: NotificationRequestIdentifier.transcode.rawValue)
                 return
             }
             
@@ -188,43 +189,49 @@ open class Downloader: NSObject {
             self.topViewController?.present(alert, animated: true, completion: nil)
         }
         
-        assemble(to: Kind.videoOnly.url, size: .max)
-        assemble(to: Kind.audioOnly.url, size: .max)
-        tryMerge()
+        _ = assemble(to: Kind.audioOnly.url, size: .max)
+        
+        let size = assemble(to: Kind.videoOnly.url, size: .max)
+        guard size < 1 else {
+            tryMerge()
+            return
+        }
 
-//        do {
-//            try FileManager.default.removeItem(at: Kind.videoOnly.url)
-//        }
-//        catch {
-//            print(#function, error)
-//        }
-//
-//        DispatchQueue.main.async {
-//            self.topViewController?.navigationItem.title = "Transcoding..."
-//        }
-//
-//        let t0 = ProcessInfo.processInfo.systemUptime
-//
-//        transcoder = Transcoder()
-//        var ret: Int32?
-//
-//        func requestProgress() {
-//            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-//                self.transcoder?.progressBlock = { progress in
-//                    self.transcoder?.progressBlock = nil
-//
-//                    let elapsed = ProcessInfo.processInfo.systemUptime - t0
-//                    let speed = progress / elapsed
-//                    let ETA = (1 - progress) / speed
-//
-//                    guard ETA.isFinite else { return }
-//
-//                    DispatchQueue.main.async {
-//                        self.topViewController?.navigationItem.title =
-//                            "Transcoding \(self.percentFormatter.string(from: NSNumber(value: progress)) ?? "?") ETA \(self.dateComponentsFormatter.string(from: ETA) ?? "?")"
-//                    }
-//                }
-//
+        _ = assemble(to: Kind.otherVideo.url, size: .max)
+        
+        do {
+            try FileManager.default.removeItem(at: Kind.videoOnly.url)
+        }
+        catch {
+            print(#function, error)
+        }
+
+        DispatchQueue.main.async {
+            self.topViewController?.navigationItem.title = "Transcoding..."
+        }
+
+        let t0 = ProcessInfo.processInfo.systemUptime
+
+        transcoder = Transcoder()
+        var ret: Int32?
+
+        func requestProgress() {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                self.transcoder?.progressBlock = { progress in
+                    self.transcoder?.progressBlock = nil
+
+                    let elapsed = ProcessInfo.processInfo.systemUptime - t0
+                    let speed = progress / elapsed
+                    let ETA = (1 - progress) / speed
+
+                    guard ETA.isFinite else { return }
+
+                    DispatchQueue.main.async {
+                        self.topViewController?.navigationItem.title =
+                            "Transcoding \(self.percentFormatter.string(from: NSNumber(value: progress)) ?? "?") ETA \(self.dateComponentsFormatter.string(from: ETA) ?? "?")"
+                    }
+                }
+
 //                self.transcoder?.frameBlock = { pixelBuffer in
 //                    self.transcoder?.frameBlock = nil
 //
@@ -232,26 +239,27 @@ open class Downloader: NSObject {
 //                        (self.topViewController as? DownloadViewController)?.pixelBuffer = pixelBuffer
 //                    }
 //                }
-//                if ret == nil {
-//                    requestProgress()
-//                }
-//            }
-//        }
-//
-//        requestProgress()
-//
-//        ret = transcoder?.transcode(from: Kind.otherVideo.url, to: Kind.videoOnly.url)
-//
-//        transcoder = nil
-//
-//        print(#function, ret ?? "nil?", "took", dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
-//
-//        notify(body: "트랜스코딩 완료")
-//
-//        tryMerge()
+                if ret == nil {
+                    requestProgress()
+                }
+            }
+        }
+
+        requestProgress()
+
+        ret = transcoder?.transcode(from: Kind.otherVideo.url, to: Kind.videoOnly.url)
+
+        transcoder = nil
+
+        print(#function, ret ?? "nil?", "took", dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
+
+        notify(body: "트랜스코딩 완료")
+
+        tryMerge()
     }
 }
 
+@available(iOS 12.0, *)
 extension Downloader: URLSessionDelegate {
     public func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
         print(#function, session, error ?? "no error")
@@ -262,6 +270,7 @@ extension Downloader: URLSessionDelegate {
     }
 }
 
+@available(iOS 12.0, *)
 extension Downloader: URLSessionTaskDelegate {
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error = error {
@@ -270,6 +279,7 @@ extension Downloader: URLSessionTaskDelegate {
     }
 }
 
+@available(iOS 12.0, *)
 extension Downloader: URLSessionDownloadDelegate {
     
     fileprivate func export(_ url: URL) {
@@ -283,20 +293,20 @@ extension Downloader: URLSessionDownloadDelegate {
         }) { (success, error) in
             print(#function, success, error ?? "")
             
-//            notify(body: "Download complete!")
+            notify(body: "Download complete!")
             DispatchQueue.main.async {
                 self.topViewController?.navigationItem.title = "Finished"
             }
         }
     }
         
-    func assemble(to url: URL, size: UInt64) {
+    func assemble(to url: URL, size: UInt64) -> UInt64 {
         FileManager.default.createFile(atPath: url.path, contents: nil, attributes: nil)
+        
+        var offset: UInt64 = 0
         
         do {
             let file = try FileHandle(forWritingTo: url)
-            
-            var offset: UInt64 = 0
             
             repeat {
                 let part = url.appendingPathExtension("part-\(offset)")
@@ -318,6 +328,7 @@ extension Downloader: URLSessionDownloadDelegate {
         catch {
             print(#function, error)
         }
+        return offset
     }
     
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
@@ -331,8 +342,6 @@ extension Downloader: URLSessionDownloadDelegate {
             if range.isEmpty {
                 try FileManager.default.moveItem(at: location, to: kind.url)
             } else {
-//                let part = kind.url.part
-//                try appendChunk(location, to: part, offset: UInt64(range.lowerBound))
                 let part = kind.url.appendingPathExtension("part-\(range.lowerBound)")
                 removeItem(at: part)
                 try FileManager.default.moveItem(at: location, to: part)
@@ -347,9 +356,6 @@ extension Downloader: URLSessionDownloadDelegate {
                     }
                     return
                 }
-                
-//                try FileManager.default.moveItem(at: part, to: kind.url)
-//                assemble(to: kind.url, size: UInt64(size))
             }
             
             DispatchQueue.main.async {
@@ -358,7 +364,10 @@ extension Downloader: URLSessionDownloadDelegate {
             
             session.getTasksWithCompletionHandler { (_, _, tasks) in
                 print(#function, tasks)
-                tasks.first { $0.state == .suspended }?.resume()
+                tasks.first {
+                    let range = $0.originalRequest?.value(forHTTPHeaderField: "Range") ?? ""
+                    return $0.state == .suspended && (range.isEmpty || range.hasPrefix("bytes=0-"))
+                }?.resume()
                 
                 if tasks.isEmpty {
                     self.transcode()
@@ -397,20 +406,25 @@ extension Downloader: URLSessionDownloadDelegate {
         let bytesPerSec = Double(count) / elapsed
         let remain = Double(size - count) / bytesPerSec
         
-//        print(
-////            #function,
-////              session,
-//              downloadTask.taskIdentifier,
-//            ByteCountFormatter.string(fromByteCount: bytesWritten, countStyle: .file),
-//            ByteCountFormatter.string(fromByteCount: totalBytesWritten, countStyle: .file),
-//            ByteCountFormatter.string(fromByteCount: totalBytesExpectedToWrite, countStyle: .file),
-//            ByteCountFormatter.string(fromByteCount: Int64(bytesPerSec), countStyle: .file), "/s",
-//            dateComponentsFormatter.string(from: elapsed) ?? "?", "elapsed",
-//            dateComponentsFormatter.string(from: remain) ?? "?", "remain"
-//            )
         let percent = percentFormatter.string(from: NSNumber(value: Double(count) / Double(size)))
         DispatchQueue.main.async {
             self.topViewController?.navigationItem.prompt = "\(percent ?? "?%") of \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) at \(ByteCountFormatter.string(fromByteCount: Int64(bytesPerSec), countStyle: .file))/s ETA \(self.dateComponentsFormatter.string(from: remain) ?? "?") \(downloadTask.taskDescription ?? "no description?")"
         }
+    }
+}
+
+// FIXME: move to view controller?
+@available(iOS 12.0, *)
+public func notify(body: String, identifier: String = "Download") {
+    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound, .providesAppNotificationSettings]) { (granted, error) in
+        print(#function, "granted =", granted, error ?? "no error")
+        guard granted else {
+            return
+        }
+        
+        let content = UNMutableNotificationContent()
+        content.body = body
+        let notificationRequest = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(notificationRequest, withCompletionHandler: nil)
     }
 }
