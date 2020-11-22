@@ -383,7 +383,14 @@ extension Downloader: URLSessionDownloadDelegate {
                 guard transcoder == nil else {
                     break
                 }
-                tryMerge()
+                if range.isEmpty {
+                    tryMerge()
+                } else {
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        _ = self.assemble(to: kind.url, size: .max)
+                        self.tryMerge()
+                    }
+                }
             case .otherVideo:
                 DispatchQueue.global(qos: .userInitiated).async {
                     self.transcode()

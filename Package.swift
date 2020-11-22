@@ -10,8 +10,8 @@ let package = Package(
             targets: ["YoutubeDL"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/kewlbear/FFmpeg-iOS.git", from: "0.0.1"),
-                 .package(url: "https://github.com/kewlbear/PythonKit.git", from: "0.0.1"),
+        .package(url: "https://github.com/kewlbear/FFmpeg-iOS.git", .branch("main")),
+                 .package(url: "https://github.com/kewlbear/PythonKit.git", .branch("master")),
     ],
     targets: [
         .target(

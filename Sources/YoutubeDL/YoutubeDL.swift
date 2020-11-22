@@ -96,10 +96,17 @@ public let defaultOptions: PythonObject = [
 ]
 
 open class YoutubeDL: NSObject {
+    public enum Error: Swift.Error {
+        case noPythonModule
+    }
+    
     public static var shouldDownloadPythonModule: Bool {
         do {
             _ = try YoutubeDL()
             return false
+        }
+        catch Error.noPythonModule {
+            return true
         }
         catch {
             guard let error = error as? PythonError,
@@ -130,6 +137,10 @@ open class YoutubeDL: NSObject {
     internal let options: PythonObject
     
     public init(options: PythonObject = defaultOptions) throws {
+        guard FileManager.default.fileExists(atPath: Self.pythonModuleURL.path) else {
+            throw Error.noPythonModule
+        }
+        
         let sys = try Python.attemptImport("sys")
         if !(Array(sys.path) ?? []).contains(Self.pythonModuleURL.path) {
             sys.path.insert(1, Self.pythonModuleURL.path)
@@ -141,7 +152,7 @@ open class YoutubeDL: NSObject {
         self.options = options
     }
     
-    open func download(url: URL, urlSession: URLSession = .shared, completionHandler: @escaping (Result<URL, Error>) -> Void) {
+    open func download(url: URL, urlSession: URLSession = .shared, completionHandler: @escaping (Result<URL, Swift.Error>) -> Void) {
         DispatchQueue.global().async {
             do {
                 let (formats, info) = try self.extractInfo(url: url)
@@ -167,7 +178,7 @@ open class YoutubeDL: NSObject {
         return (formats, Info(info: info))
     }
     
-    public static func downloadPythonModule(from url: URL = latestDownloadURL, completionHandler: @escaping (Error?) -> Void) {
+    public static func downloadPythonModule(from url: URL = latestDownloadURL, completionHandler: @escaping (Swift.Error?) -> Void) {
         let task = URLSession.shared.downloadTask(with: url) { (location, response, error) in
             guard let location = location else {
                 completionHandler(error)
