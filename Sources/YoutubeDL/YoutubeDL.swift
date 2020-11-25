@@ -132,6 +132,8 @@ open class YoutubeDL: NSObject {
         return directory.appendingPathComponent("youtube_dl")
     }()
     
+    public let version: String?
+    
     internal let pythonObject: PythonObject
 
     internal let options: PythonObject
@@ -150,6 +152,8 @@ open class YoutubeDL: NSObject {
         pythonObject = pythonModule.YoutubeDL(options)
         
         self.options = options
+        
+        version = String(pythonModule.version.__version__)
     }
     
     open func download(url: URL, urlSession: URLSession = .shared, completionHandler: @escaping (Result<URL, Swift.Error>) -> Void) {

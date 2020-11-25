@@ -66,10 +66,13 @@ open class Downloader: NSObject {
     open var t0 = ProcessInfo.processInfo.systemUptime
     
     var topViewController: UIViewController? {
-        (UIApplication.shared.keyWindow?.rootViewController as? UINavigationController)?.topViewController
+//        (UIApplication.shared.keyWindow?.rootViewController as? UINavigationController)?.topViewController
+        nil
     }
     
     open var transcoder: Transcoder?
+    
+    open var progress = Progress()
     
     init(backgroundURLSessionIdentifier: String?) {
         super.init()
@@ -117,6 +120,15 @@ open class Downloader: NSObject {
     
     func tryMerge() {
         let t0 = ProcessInfo.processInfo.systemUptime
+        
+        DispatchQueue.main.async {
+            self.progress.kind = nil
+            self.progress.localizedDescription = NSLocalizedString("Merging...", comment: "Progress description")
+            self.progress.localizedAdditionalDescription = nil
+            self.progress.totalUnitCount = 0
+            self.progress.completedUnitCount = 0
+            self.progress.estimatedTimeRemaining = nil
+        }
         
         let videoAsset = AVAsset(url: Kind.videoOnly.url)
         let audioAsset = AVAsset(url: Kind.audioOnly.url)
@@ -207,7 +219,11 @@ open class Downloader: NSObject {
         }
 
         DispatchQueue.main.async {
-            self.topViewController?.navigationItem.title = NSLocalizedString("Transcoding...", comment: "Message") 
+            self.progress.kind = nil
+            self.progress.localizedDescription = NSLocalizedString("Transcoding...", comment: "Progress description")
+            self.progress.totalUnitCount = 100
+            
+            self.topViewController?.navigationItem.title = NSLocalizedString("Transcoding...", comment: "Message")
         }
 
         let t0 = ProcessInfo.processInfo.systemUptime
@@ -227,6 +243,9 @@ open class Downloader: NSObject {
                     guard ETA.isFinite else { return }
 
                     DispatchQueue.main.async {
+                        self.progress.completedUnitCount = Int64(progress * 100)
+                        self.progress.estimatedTimeRemaining = ETA
+                        
                         self.topViewController?.navigationItem.title
                             = String(format: NSLocalizedString("TranscodeProgressFormat", comment: "Message"),
                                      self.percentFormatter.string(from: NSNumber(value: progress)) ?? "?",
@@ -286,7 +305,17 @@ extension Downloader: URLSessionDownloadDelegate {
     
     fileprivate func export(_ url: URL) {
         DispatchQueue.main.async {
-            self.topViewController?.navigationItem.title = NSLocalizedString("Exporting...", comment: "Message") 
+            self.progress.localizedDescription = nil
+            self.progress.localizedAdditionalDescription = nil
+            self.progress.kind = .file
+            self.progress.fileOperationKind = .copying
+            self.progress.fileURL = url
+            self.progress.completedUnitCount = 0
+            self.progress.estimatedTimeRemaining = nil
+            self.progress.throughput = nil
+            self.progress.fileTotalCount = 1
+            
+            self.topViewController?.navigationItem.title = NSLocalizedString("Exporting...", comment: "Message")
         }
         
         PHPhotoLibrary.shared().performChanges({
@@ -297,18 +326,28 @@ extension Downloader: URLSessionDownloadDelegate {
             
             notify(body: NSLocalizedString("Download complete!", comment: "Notification body"))
             DispatchQueue.main.async {
+                self.progress.fileCompletedCount = 1
+                do {
+                    let attributes = try FileManager.default.attributesOfItem(atPath: url.path) as NSDictionary
+                    self.progress.completedUnitCount = Int64(attributes.fileSize())
+                }
+                catch {
+                    self.progress.localizedDescription = error.localizedDescription
+                }
+                
                 self.topViewController?.navigationItem.title = NSLocalizedString("Finished", comment: "Message") 
             }
         }
     }
         
     func assemble(to url: URL, size: UInt64) -> UInt64 {
-        FileManager.default.createFile(atPath: url.path, contents: nil, attributes: nil)
+        let partURL = url.appendingPathExtension("part")
+        FileManager.default.createFile(atPath: partURL.path, contents: nil, attributes: nil)
         
         var offset: UInt64 = 0
         
         do {
-            let file = try FileHandle(forWritingTo: url)
+            let file = try FileHandle(forWritingTo: partURL)
             
             repeat {
                 let part = url.appendingPathExtension("part-\(offset)")
@@ -330,6 +369,16 @@ extension Downloader: URLSessionDownloadDelegate {
         catch {
             print(#function, error)
         }
+        
+        removeItem(at: url)
+        
+        do {
+            try FileManager.default.moveItem(at: partURL, to: url)
+        }
+        catch {
+            print(#function, error)
+        }
+        
         return offset
     }
     
@@ -342,6 +391,7 @@ extension Downloader: URLSessionDownloadDelegate {
 
         do {
             if range.isEmpty {
+                removeItem(at: kind.url)
                 try FileManager.default.moveItem(at: location, to: kind.url)
             } else {
                 let part = kind.url.appendingPathExtension("part-\(range.lowerBound)")
@@ -361,15 +411,32 @@ extension Downloader: URLSessionDownloadDelegate {
             }
             
             DispatchQueue.main.async {
-                self.topViewController?.navigationItem.prompt = NSLocalizedString("Download finished", comment: "Message") 
+                if self.progress.fileTotalCount != nil {
+                    self.progress.fileCompletedCount = (self.progress.fileCompletedCount ?? 0) + 1
+                }
+
+                self.topViewController?.navigationItem.prompt = NSLocalizedString("Download finished", comment: "Message")
             }
             
             session.getTasksWithCompletionHandler { (_, _, tasks) in
                 print(#function, tasks)
-                tasks.first {
+                if let task = tasks.first(where: {
                     let range = $0.originalRequest?.value(forHTTPHeaderField: "Range") ?? ""
                     return $0.state == .suspended && (range.isEmpty || range.hasPrefix("bytes=0-"))
-                }?.resume()
+                }) {
+                    DispatchQueue.main.async {
+                        task.taskDescription.flatMap { Kind(rawValue: $0) }.map { kind in
+                            do {
+                                try "".write(to: kind.url, atomically: false, encoding: .utf8)
+                            }
+                            catch {
+                                print(error)
+                            }
+                            self.progress.fileURL = kind.url
+                        }
+                    }
+                    task.resume()
+                }
                 
                 if tasks.isEmpty {
                     self.transcode()
@@ -416,7 +483,13 @@ extension Downloader: URLSessionDownloadDelegate {
         let remain = Double(size - count) / bytesPerSec
         
         let percent = percentFormatter.string(from: NSNumber(value: Double(count) / Double(size)))
+        
         DispatchQueue.main.async {
+            self.progress.totalUnitCount = size
+            self.progress.completedUnitCount = count
+            self.progress.throughput = Int(bytesPerSec)
+            self.progress.estimatedTimeRemaining = remain
+            
             self.topViewController?.navigationItem.prompt
                 = String(format: NSLocalizedString("DownloadProgressFormat", comment: "Message"),
                          percent ?? "?%",
