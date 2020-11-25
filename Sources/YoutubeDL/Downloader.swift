@@ -66,8 +66,11 @@ open class Downloader: NSObject {
     open var t0 = ProcessInfo.processInfo.systemUptime
     
     var topViewController: UIViewController? {
-//        (UIApplication.shared.keyWindow?.rootViewController as? UINavigationController)?.topViewController
-        nil
+        if #available(iOS 14.0, *) {
+            return nil
+        } else {
+            return (UIApplication.shared.keyWindow?.rootViewController as? UINavigationController)?.topViewController
+        }
     }
     
     open var transcoder: Transcoder?
