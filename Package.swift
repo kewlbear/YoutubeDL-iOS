@@ -11,12 +11,13 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/kewlbear/FFmpeg-iOS.git", .branch("main")),
-                 .package(url: "https://github.com/kewlbear/PythonKit.git", .branch("master")),
+        .package(url: "https://github.com/kewlbear/PythonKit.git", .branch("master")),
+        .package(url: "https://github.com/kewlbear/Python-iOS.git", .branch("main")),
     ],
     targets: [
         .target(
             name: "YoutubeDL",
-            dependencies: ["PythonKit", "FFmpeg-iOS"]),
+            dependencies: ["Python-iOS", "PythonKit", "FFmpeg-iOS"]),
         .testTarget(
             name: "YoutubeDLTests",
             dependencies: ["YoutubeDL"]),
