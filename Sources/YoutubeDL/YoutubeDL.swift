@@ -22,6 +22,7 @@
 
 import Foundation
 import PythonKit
+import PythonSupport
 
 public struct Info: CustomStringConvertible {
     let info: PythonObject
@@ -118,7 +119,7 @@ open class YoutubeDL: NSObject {
         }
     }
     
-    public static let latestDownloadURL = URL(string: "https://yt-dl.org/downloads/latest/youtube-dl")!
+    public static let latestDownloadURL = URL(string: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp")!
     
     public static var pythonModuleURL: URL = {
         guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
@@ -129,7 +130,7 @@ open class YoutubeDL: NSObject {
         catch {
             fatalError(error.localizedDescription)
         }
-        return directory.appendingPathComponent("youtube_dl")
+        return directory.appendingPathComponent("yt_dlp")
     }()
     
     public let version: String?
@@ -148,7 +149,15 @@ open class YoutubeDL: NSObject {
             sys.path.insert(1, Self.pythonModuleURL.path)
         }
         
-        let pythonModule = try Python.attemptImport("youtube_dl")
+        runSimpleString("""
+            class Pop:
+                pass
+
+            import subprocess
+            subprocess.Popen = Pop
+            """)
+        
+        let pythonModule = try Python.attemptImport("yt_dlp")
         pythonObject = pythonModule.YoutubeDL(options)
         
         self.options = options
