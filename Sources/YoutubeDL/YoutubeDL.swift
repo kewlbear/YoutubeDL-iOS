@@ -101,6 +101,21 @@ open class YoutubeDL: NSObject {
         case noPythonModule
     }
     
+    public struct Options: OptionSet {
+        public let rawValue: Int
+        
+        public static let noRemux = Options(rawValue: 1 << 0)
+        public static let noTranscode = Options(rawValue: 1 << 1)
+        public static let chunked = Options(rawValue: 1 << 2)
+        public static let background = Options(rawValue: 1 << 3)
+
+        public static let all: Options = [.noRemux, .noTranscode, .chunked, .background]
+        
+        public init(rawValue: Int) {
+            self.rawValue = rawValue
+        }
+    }
+    
     public static var shouldDownloadPythonModule: Bool {
         do {
             _ = try YoutubeDL()
@@ -135,6 +150,8 @@ open class YoutubeDL: NSObject {
     
     public let version: String?
     
+    public lazy var downloader = Downloader.shared
+    
     internal let pythonObject: PythonObject
 
     internal let options: PythonObject
@@ -160,9 +177,76 @@ open class YoutubeDL: NSObject {
         let pythonModule = try Python.attemptImport("yt_dlp")
         pythonObject = pythonModule.YoutubeDL(options)
         
-        self.options = options
+        self.options = options ?? defaultOptions
         
         version = String(pythonModule.version.__version__)
+    }
+    
+    public convenience init(_ options: PythonObject? = nil, initializePython: Bool = true, downloadPythonModule: Bool = true) async throws {
+        if initializePython {
+            PythonSupport.initialize()
+        }
+        
+        if !FileManager.default.fileExists(atPath: Self.pythonModuleURL.path) {
+            guard downloadPythonModule else {
+                throw Error.noPythonModule
+            }
+            try await Self.downloadPythonModule()
+        }
+        
+        try self.init(options: options ?? defaultOptions)
+    }
+        
+    open func download(url: URL, options: Options = [.chunked, .background]) async throws -> URL {
+        let (formats, info) = try extractInfo(url: url)
+        
+        for format in formats {
+            let url = try await download(format: format, faster: options.contains(.chunked))
+            print(#function, "downloaded to:", url)
+        }
+        
+        return try await withCheckedThrowingContinuation { continuation in
+            self.downloader.continuation = continuation
+        }
+    }
+    
+    open func download(format: Format, faster: Bool) async throws -> URL {
+        let kind: Downloader.Kind = format.isVideoOnly
+        ? (!format.isTranscodingNeeded ? .videoOnly : .otherVideo)
+        : (format.isAudioOnly ? .audioOnly : .complete)
+        
+        func download(for request: URLRequest) async throws -> URL {
+            let progress: Progress? = downloader.progress
+            progress?.kind = .file
+            progress?.fileOperationKind = .downloading
+            do {
+                try "".write(to: kind.url, atomically: false, encoding: .utf8)
+            }
+            catch {
+                print(error)
+            }
+            progress?.fileURL = kind.url
+            
+            let task = downloader.download(request: request, kind: kind)
+            print(#function, "start download:", task.info)
+            
+            return try await withCheckedThrowingContinuation { continuation in
+                self.downloader.continuation = continuation
+            }
+        }
+        
+        if faster, let size = format.filesize {
+            guard var request = format.urlRequest else { fatalError() }
+            // https://github.com/ytdl-org/youtube-dl/issues/15271#issuecomment-362834889
+            let end = request.setRange(start: 0, fullSize: size)
+            print(#function, "first chunked size:", end)
+            
+            return try await download(for: request)
+        } else {
+            guard let request = format.urlRequest else { fatalError() }
+            
+            return try await download(for: request)
+        }
     }
     
     open func download(url: URL, urlSession: URLSession = .shared, completionHandler: @escaping (Result<URL, Swift.Error>) -> Void) {
@@ -191,6 +275,17 @@ open class YoutubeDL: NSObject {
         return (formats, Info(info: info))
     }
     
+    fileprivate static func movePythonModule(_ location: URL) throws {
+        do {
+            try FileManager.default.removeItem(at: pythonModuleURL)
+        }
+        catch {
+            print(error)
+        }
+        
+        try FileManager.default.moveItem(at: location, to: pythonModuleURL)
+    }
+    
     public static func downloadPythonModule(from url: URL = latestDownloadURL, completionHandler: @escaping (Swift.Error?) -> Void) {
         let task = URLSession.shared.downloadTask(with: url) { (location, response, error) in
             guard let location = location else {
@@ -198,14 +293,7 @@ open class YoutubeDL: NSObject {
                 return
             }
             do {
-                do {
-                    try FileManager.default.removeItem(at: pythonModuleURL)
-                }
-                catch {
-                    print(error)
-                }
-                
-                try FileManager.default.moveItem(at: location, to: pythonModuleURL)
+                try movePythonModule(location)
 
                 completionHandler(nil)
             }
@@ -216,5 +304,46 @@ open class YoutubeDL: NSObject {
         }
         
         task.resume()
+    }
+    
+    public static func downloadPythonModule(from url: URL = latestDownloadURL) async throws {
+        if #available(iOS 15.0, *) {
+            let (location, _) = try await URLSession.shared.download(from: url)
+            try movePythonModule(location)
+        } else {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
+                downloadPythonModule(from: url) { error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+    }
+}
+
+let av1CodecPrefix = "av01."
+
+public extension Format {
+    var isRemuxingNeeded: Bool { isVideoOnly || isAudioOnly }
+    
+    var isTranscodingNeeded: Bool {
+        self.ext == "mp4"
+            ? (self.vcodec ?? "").hasPrefix(av1CodecPrefix)
+            : self.ext != "m4a"
+    }
+}
+
+extension URL {
+    var part: URL {
+        appendingPathExtension("part")
+    }
+}
+
+extension URLSessionDownloadTask {
+    var info: String {
+        "\(taskDescription ?? "no task description") \(originalRequest?.value(forHTTPHeaderField: "Range") ?? "no range")"
     }
 }

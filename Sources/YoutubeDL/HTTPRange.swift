@@ -32,7 +32,7 @@ extension HTTPURLResponse {
         } else {
             contentRange = allHeaderFields["Content-Range"] as? String
         }
-        print(#function, contentRange ?? "no Content-Range?")
+//        print(#function, contentRange ?? "no Content-Range?")
         
         guard let string = contentRange else { return nil }
         let scanner = Scanner(string: string)

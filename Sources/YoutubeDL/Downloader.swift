@@ -33,12 +33,14 @@ public enum NotificationRequestIdentifier: String {
 @available(iOS 12.0, *)
 open class Downloader: NSObject {
 
-    public enum Kind: String {
+    public enum Kind: String, CustomStringConvertible {
         case complete, videoOnly, audioOnly, otherVideo
         
         public var url: URL {
             do {
-                return try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                return
+//                try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                URL(fileURLWithPath: NSTemporaryDirectory())
                     .appendingPathComponent("video")
                     .appendingPathExtension(self != .audioOnly
                                                 ? (self == .otherVideo ? "other" : "mp4")
@@ -49,9 +51,11 @@ open class Downloader: NSObject {
                 fatalError()
             }
         }
+        
+        public var description: String { rawValue }
     }
     
-    public static let shared = Downloader(backgroundURLSessionIdentifier: "YoutubeDL")
+    public static let shared = Downloader(backgroundURLSessionIdentifier: "YoutubeDL-iOS")
     
     open var session: URLSession = URLSession.shared
     
@@ -76,6 +80,10 @@ open class Downloader: NSObject {
     open var transcoder: Transcoder?
     
     open var progress = Progress()
+    
+    var continuation: CheckedContinuation<URL, Error>?
+    
+    var currentRequest: URLRequest?
     
     init(backgroundURLSessionIdentifier: String?) {
         super.init()
@@ -114,10 +122,13 @@ open class Downloader: NSObject {
     open func download(request: URLRequest, kind: Kind) -> URLSessionDownloadTask {
         removeItem(at: kind.url)
 
+        currentRequest = request
+        
         let task = session.downloadTask(with: request)
         task.taskDescription = kind.rawValue
-//        print(#function, request, trace)
         task.priority = URLSessionTask.highPriority
+        
+        task.resume()
         return task
     }
     
@@ -277,7 +288,9 @@ open class Downloader: NSObject {
 
         print(#function, ret ?? "nil?", "took", dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
 
-        notify(body: NSLocalizedString("FinishedTranscoding", comment: "Notification body"))
+        if continuation == nil {
+            notify(body: NSLocalizedString("FinishedTranscoding", comment: "Notification body"))
+        }
 
         tryMerge()
     }
@@ -327,7 +340,11 @@ extension Downloader: URLSessionDownloadDelegate {
         }) { (success, error) in
             print(#function, success, error ?? "")
             
-            notify(body: NSLocalizedString("Download complete!", comment: "Notification body"))
+            if let continuation = self.continuation {
+                continuation.resume(returning: url)
+            } else {
+                notify(body: NSLocalizedString("Download complete!", comment: "Notification body"))
+            }
             DispatchQueue.main.async {
                 self.progress.fileCompletedCount = 1
                 do {
@@ -386,9 +403,16 @@ extension Downloader: URLSessionDownloadDelegate {
     }
     
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        guard currentRequest == nil || downloadTask.originalRequest == currentRequest && downloadTask.originalRequest?.value(forHTTPHeaderField: "Range") == currentRequest?.value(forHTTPHeaderField: "Range") else {
+            print(#function, "ignore", downloadTask.info, "(current request:", currentRequest ?? "nil", ")")
+            return
+        }
+        
         let (_, range, size) = (downloadTask.response as? HTTPURLResponse)?.contentRange
             ?? (nil, -1 ..< -1, -1)
-//        print(#function, session, location)
+        print(#function, range, size, downloadTask.info, currentRequest?.value(forHTTPHeaderField: "Range") ?? "no current request or range"
+//              , session, location
+        )
         
         let kind = Kind(rawValue: downloadTask.taskDescription ?? "") ?? .complete
 
@@ -402,15 +426,18 @@ extension Downloader: URLSessionDownloadDelegate {
                 try FileManager.default.moveItem(at: location, to: part)
 
                 guard range.upperBound >= size else {
-                    session.getTasksWithCompletionHandler { (_, _, tasks) in
-                        tasks.first {
-                            $0.originalRequest?.url == downloadTask.originalRequest?.url
-                                && ($0.originalRequest?.value(forHTTPHeaderField: "Range") ?? "")
-                                .hasPrefix("bytes=\(range.upperBound)-") }?
-                            .resume()
+                    guard var request = downloadTask.originalRequest else {
+                        print(#function, "no original request")
+                        return
                     }
+                    let end = request.setRange(start: range.upperBound, fullSize: size)
+                    let task = download(request: request, kind: kind)
+                    print(#function, "continue download to offset \(end)", task)
                     return
                 }
+                
+//                let offset = assemble(to: kind.url, size: UInt64(size))
+//                print(#function, "assembled to offset \(offset)")
             }
             
             DispatchQueue.main.async {
@@ -421,43 +448,23 @@ extension Downloader: URLSessionDownloadDelegate {
                 self.topViewController?.navigationItem.prompt = NSLocalizedString("Download finished", comment: "Message")
             }
             
-            session.getTasksWithCompletionHandler { (_, _, tasks) in
-                print(#function, tasks)
-                if let task = tasks.first(where: {
-                    let range = $0.originalRequest?.value(forHTTPHeaderField: "Range") ?? ""
-                    return $0.state == .suspended && (range.isEmpty || range.hasPrefix("bytes=0-"))
-                }) {
-                    DispatchQueue.main.async {
-                        task.taskDescription.flatMap { Kind(rawValue: $0) }.map { kind in
-                            do {
-                                try "".write(to: kind.url, atomically: false, encoding: .utf8)
-                            }
-                            catch {
-                                print(error)
-                            }
-                            self.progress.fileURL = kind.url
-                        }
-                    }
-                    task.resume()
-                }
-                
-                if tasks.isEmpty {
-                    self.transcode()
-                }
-            }
-            
+            continuation?.resume(returning: kind.url)
+           
             switch kind {
             case .complete:
                 export(kind.url)
             case .videoOnly, .audioOnly:
-                guard transcoder == nil else {
-                    break
-                }
                 if range.isEmpty {
+                    guard transcoder == nil else {
+                        break
+                    }
                     tryMerge()
                 } else {
                     DispatchQueue.global(qos: .userInitiated).async {
                         _ = self.assemble(to: kind.url, size: .max)
+                        guard self.transcoder == nil else {
+                            return
+                        }
                         self.tryMerge()
                     }
                 }
