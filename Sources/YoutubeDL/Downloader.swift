@@ -38,13 +38,11 @@ open class Downloader: NSObject {
         
         public var url: URL {
             do {
-                return
-//                try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-                URL(fileURLWithPath: NSTemporaryDirectory())
+                return try FileManager.default.url(for: .downloadsDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                     .appendingPathComponent("video")
                     .appendingPathExtension(self != .audioOnly
-                                                ? (self == .otherVideo ? "other" : "mp4")
-                                                : "m4a")
+                                            ? (self == .otherVideo ? "other" : "mp4")
+                                            : "m4a")
             }
             catch {
                 print(error)
