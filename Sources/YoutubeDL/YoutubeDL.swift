@@ -98,6 +98,10 @@ public let defaultOptions: PythonObject = [
     "nocheckcertificate": true,
 ]
 
+public enum YoutubeDLError: Error {
+    case canceled
+}
+
 open class YoutubeDL: NSObject {
     public enum Error: Swift.Error {
         case noPythonModule
@@ -175,16 +179,16 @@ open class YoutubeDL: NSObject {
         
         let sys = try Python.attemptImport("sys")
         if !(Array(sys.path) ?? []).contains(Self.pythonModuleURL.path) {
+            runSimpleString("""
+                class Pop:
+                    pass
+
+                import subprocess
+                subprocess.Popen = Pop
+                """)
+            
             sys.path.insert(1, Self.pythonModuleURL.path)
         }
-        
-        runSimpleString("""
-            class Pop:
-                pass
-
-            import subprocess
-            subprocess.Popen = Pop
-            """)
         
         let pythonModule = try Python.attemptImport("yt_dlp")
         pythonObject = pythonModule.YoutubeDL(options)
@@ -209,8 +213,13 @@ open class YoutubeDL: NSObject {
         try self.init(options: options ?? defaultOptions)
     }
         
-    open func download(url: URL, options: Options = [.chunked, .background]) async throws -> URL {
-        let (formats, info) = try extractInfo(url: url)
+    open func download(url: URL, options: Options = [.chunked, .background], formatSelector: ((Info?) async -> [Format])? = nil) async throws -> URL {
+        var (formats, info) = try extractInfo(url: url)
+        
+        if let formatSelector = formatSelector {
+            formats = await formatSelector(info)
+            guard formats.isEmpty else { throw YoutubeDLError.canceled }
+        }
         
         Task {
             for await (url, kind) in downloader.stream {

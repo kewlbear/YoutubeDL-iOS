@@ -33,7 +33,10 @@ public enum Kind: String, CustomStringConvertible {
     
     public var url: URL {
         do {
-            return try FileManager.default.url(for: .downloadsDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            let url = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                .appendingPathComponent("Downloads")
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return url
                 .appendingPathComponent("video")
                 .appendingPathExtension(self != .audioOnly
                                         ? (self == .otherVideo ? "other" : "mp4")
