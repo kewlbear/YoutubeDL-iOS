@@ -248,7 +248,7 @@ open class YoutubeDL: NSObject {
         
         if let formatSelector = formatSelector {
             formats = await formatSelector(info)
-            guard formats.isEmpty else { throw YoutubeDLError.canceled }
+            guard !formats.isEmpty else { throw YoutubeDLError.canceled }
         }
         
         _ = postDownloadTask

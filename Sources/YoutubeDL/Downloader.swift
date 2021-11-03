@@ -250,8 +250,6 @@ extension Downloader: URLSessionDownloadDelegate {
                 }
                 
                 _ = assemble(to: url, size: UInt64(size), kind: kind)
-                
-                streamContinuation?.yield((url, kind))
             }
             
             DispatchQueue.main.async {
