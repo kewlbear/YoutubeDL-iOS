@@ -30,25 +30,10 @@ public enum NotificationRequestIdentifier: String {
 
 public enum Kind: String, CustomStringConvertible {
     case complete, videoOnly, audioOnly, otherVideo
-    
-    public var url: URL {
-        do {
-            let url = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-                .appendingPathComponent("Downloads")
-            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-            return url
-                .appendingPathComponent("video")
-                .appendingPathExtension(self != .audioOnly
-                                        ? (self == .otherVideo ? "other" : "mp4")
-                                        : "m4a")
-        }
-        catch {
-            print(error)
-            fatalError()
-        }
-    }
-    
+   
     public var description: String { rawValue }
+    
+    static let separator = "-"
 }
 
 @available(iOS 12.0, *)
@@ -84,6 +69,13 @@ open class Downloader: NSObject {
     
     var streamContinuation: AsyncStream<(URL, Kind)>.Continuation?
     
+    public lazy var directory: URL = {
+        let url = try! FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("Downloads")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
+    
     init(backgroundURLSessionIdentifier: String?, createURLSession: Bool = true) {
         super.init()
         
@@ -107,30 +99,28 @@ open class Downloader: NSObject {
         print(session, "created")
     }
 
-    func removeItem(at url: URL) {
-        do {
-            try FileManager.default.removeItem(at: url)
-            print(#function, "removed", url.lastPathComponent)
-        }
-        catch {
-            let error = error as NSError
-            if error.domain != NSCocoaErrorDomain || error.code != CocoaError.fileNoSuchFile.rawValue {
-                print(#function, error)
-            }
-        }
-    }
-    
-    open func download(request: URLRequest, kind: Kind) -> URLSessionDownloadTask {
-        removeItem(at: kind.url)
-
+    open func download(request: URLRequest, url: URL) -> URLSessionDownloadTask {
         currentRequest = request
         
         let task = session.downloadTask(with: request)
-        task.taskDescription = kind.rawValue
+        task.taskDescription = url.lastPathComponent
         task.priority = URLSessionTask.highPriority
         
         task.resume()
         return task
+    }
+}
+
+func removeItem(at url: URL) {
+    do {
+        try FileManager.default.removeItem(at: url)
+        print(#function, "removed", url.lastPathComponent)
+    }
+    catch {
+        let error = error as NSError
+        if error.domain != NSCocoaErrorDomain || error.code != CocoaError.fileNoSuchFile.rawValue {
+            print(#function, error)
+        }
     }
 }
 
@@ -169,7 +159,7 @@ extension Downloader: URLSessionTaskDelegate {
 @available(iOS 12.0, *)
 extension Downloader: URLSessionDownloadDelegate {
    
-    func assemble(to url: URL, size: UInt64, kind: Kind? = nil) -> UInt64 {
+    func assemble(to url: URL, size: UInt64, kind: Kind) -> UInt64 {
         let partURL = url.appendingPathExtension("part")
         FileManager.default.createFile(atPath: partURL.path, contents: nil, attributes: nil)
         
@@ -189,6 +179,7 @@ extension Downloader: URLSessionDownloadDelegate {
                 }
                 
                 file.write(data)
+                print(#function, "wrote \(data.count) bytes to \(partURL.lastPathComponent)")
                 
                 removeItem(at: part)
                 
@@ -204,9 +195,8 @@ extension Downloader: URLSessionDownloadDelegate {
         do {
             try FileManager.default.moveItem(at: partURL, to: url)
             
-            kind.map {
-                _ = streamContinuation?.yield((url, $0))
-            }
+            let result = streamContinuation?.yield((url, kind))
+            guard case .enqueued(remaining: _) = result else { fatalError() }
         }
         catch {
             print(#function, error)
@@ -216,6 +206,11 @@ extension Downloader: URLSessionDownloadDelegate {
     }
     
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        guard let taskDescription = downloadTask.taskDescription else {
+            print(#function, "no task description", downloadTask)
+            return
+        }
+        
 //        guard currentRequest == nil || downloadTask.originalRequest == currentRequest && downloadTask.originalRequest?.value(forHTTPHeaderField: "Range") == currentRequest?.value(forHTTPHeaderField: "Range") else {
 //            print(#function, "ignore", downloadTask.info, "(current request:", currentRequest ?? "nil", ")")
 //            return
@@ -227,17 +222,18 @@ extension Downloader: URLSessionDownloadDelegate {
 //              , session, location
         )
         
-        let kind = Kind(rawValue: downloadTask.taskDescription ?? "") ?? .complete
+        let kind = downloadTask.kind
+        let url = directory.appendingPathComponent(downloadTask.taskDescription ?? "complete.mp4")
 
         do {
             if range.isEmpty {
-                removeItem(at: kind.url)
-                try FileManager.default.moveItem(at: location, to: kind.url)
-                print(#function, "moved to", kind.url)
+                removeItem(at: url)
+                try FileManager.default.moveItem(at: location, to: url)
+                print(#function, "moved to", url)
                 
-                streamContinuation?.yield((kind.url, kind))
+                streamContinuation?.yield((url, kind))
             } else {
-                let part = kind.url.appendingPathExtension("part-\(range.lowerBound)")
+                let part = url.appendingPathExtension("part-\(range.lowerBound)")
                 removeItem(at: part)
                 try FileManager.default.moveItem(at: location, to: part)
                 print(#function, "moved to", part)
@@ -248,14 +244,14 @@ extension Downloader: URLSessionDownloadDelegate {
                         return
                     }
                     let end = request.setRange(start: range.upperBound, fullSize: size)
-                    let task = download(request: request, kind: kind)
+                    let task = download(request: request, url: url)
                     print(#function, "continue download to offset \(end)", task)
                     return
                 }
                 
-                _ = assemble(to: kind.url, size: UInt64(size))
+                _ = assemble(to: url, size: UInt64(size), kind: kind)
                 
-                streamContinuation?.yield((kind.url, kind))
+                streamContinuation?.yield((url, kind))
             }
             
             DispatchQueue.main.async {
@@ -294,9 +290,22 @@ extension Downloader: URLSessionDownloadDelegate {
     }
 }
 
+extension URLSessionDownloadTask {
+    var kind: Kind {
+        Kind(rawValue: URL(fileURLWithPath: taskDescription ?? "")
+                .deletingPathExtension()
+                .path.components(separatedBy: Kind.separator)
+                .last ?? "")
+        ?? .complete
+    }
+}
+
+var isTest = false
+
 // FIXME: move to view controller?
 @available(iOS 12.0, *)
 public func notify(body: String, identifier: String = "Download") {
+    guard !isTest else { return }
     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound, .providesAppNotificationSettings]) { (granted, error) in
         print(#function, "granted =", granted, error ?? "no error")
         guard granted else {
