@@ -27,6 +27,7 @@ import avformat
 import avfilter
 import swscale
 import swresample
+import ffmpeg
 
 open class Transcoder {
     open var isCancelled = false

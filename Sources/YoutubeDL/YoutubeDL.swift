@@ -329,17 +329,7 @@ open class YoutubeDL: NSObject {
     
     func tryMerge(title: String) {
         let t0 = ProcessInfo.processInfo.systemUptime
-        
-        DispatchQueue.main.async {
-            let progress = self.downloader.progress
-            progress.kind = nil
-            progress.localizedDescription = NSLocalizedString("Merging...", comment: "Progress description")
-            progress.localizedAdditionalDescription = nil
-            progress.totalUnitCount = 0
-            progress.completedUnitCount = 0
-            progress.estimatedTimeRemaining = nil
-        }
-        
+       
         let videoURL = makeURL(title: title, kind: .videoOnly, ext: "mp4")
         let audioURL: URL = makeURL(title: title, kind: .audioOnly, ext: "m4a")
         let videoAsset = AVAsset(url: videoURL)
@@ -378,6 +368,17 @@ open class YoutubeDL: NSObject {
         session.outputURL = outputURL
         session.outputFileType = .mp4
         print(#function, "merging...")
+        
+        DispatchQueue.main.async {
+            let progress = self.downloader.progress
+            progress.kind = nil
+            progress.localizedDescription = NSLocalizedString("Merging...", comment: "Progress description")
+            progress.localizedAdditionalDescription = nil
+            progress.totalUnitCount = 0
+            progress.completedUnitCount = 0
+            progress.estimatedTimeRemaining = nil
+        }
+        
         session.exportAsynchronously {
             print(#function, "finished merge", session.status.rawValue)
             print(#function, "took", self.downloader.dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
@@ -456,6 +457,8 @@ open class YoutubeDL: NSObject {
 
         print(#function, ret ?? "nil?", "took", downloader.dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
 
+        guard ret == 0 else { return }
+        
         if !keepIntermediates {
             removeItem(at: url)
         }
