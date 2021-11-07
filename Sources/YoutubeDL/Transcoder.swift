@@ -27,7 +27,7 @@ import avformat
 import avfilter
 import swscale
 import swresample
-import ffmpeg
+import FFmpegSupport
 
 open class Transcoder {
     open var isCancelled = false
@@ -385,7 +385,10 @@ open class Transcoder {
         }
     }
     
-    func transcode(from: URL, to url: URL) -> Int32 {
+    func transcode(from: URL, to url: URL) async -> Int32 {
+        let code = await FFmpegSupport.transcode(from: from, to: url)
+        return Int32(code)
+        
         var ret = open_input_file(filename: from.path)
         if ret < 0 {
             return ret

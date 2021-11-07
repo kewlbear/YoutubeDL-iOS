@@ -53,7 +53,7 @@ public struct Info: CustomStringConvertible {
     }
 }
 
-let chunkSize: Int64 = 10_000_000
+let chunkSize: Int64 = 2_000_000
 
 @dynamicMemberLookup
 public struct Format: CustomStringConvertible {
@@ -97,6 +97,7 @@ public struct Format: CustomStringConvertible {
 public let defaultOptions: PythonObject = [
     "format": "bestvideo,bestaudio[ext=m4a]",
     "nocheckcertificate": true,
+    "verbose": true,
 ]
 
 public enum YoutubeDLError: Error {
@@ -194,7 +195,7 @@ open class YoutubeDL: NSObject {
                 tryMerge(title: url.title)
             case .otherVideo:
 //                    Task {
-                    transcode(url: url)
+                await transcode(url: url)
 ////                    }
             }
         }
@@ -209,7 +210,24 @@ open class YoutubeDL: NSObject {
         if !(Array(sys.path) ?? []).contains(Self.pythonModuleURL.path) {
             runSimpleString("""
                 class Pop:
-                    pass
+                    def __init__(self, args, bufsize=-1, executable=None,
+                                 stdin=None, stdout=None, stderr=None,
+                                 preexec_fn=None, close_fds=True,
+                                 shell=False, cwd=None, env=None, universal_newlines=None,
+                                 startupinfo=None, creationflags=0,
+                                 restore_signals=True, start_new_session=False,
+                                 pass_fds=(), *, user=None, group=None, extra_groups=None,
+                                 encoding=None, errors=None, text=None, umask=-1, pipesize=-1):
+                        raise OSError("Popen is not supported")
+                
+                    def communicate(self, input=None, timeout=None):
+                        pass
+                
+                    def kill(self):
+                        pass
+
+                    def wait(self):
+                        pass
 
                 import subprocess
                 subprocess.Popen = Pop
@@ -241,10 +259,10 @@ open class YoutubeDL: NSObject {
         try self.init(options: options ?? defaultOptions)
     }
         
-    open func download(url: URL, options: Options = [.chunked, .background], formatSelector: ((Info?) async -> [Format])? = nil) async throws -> URL {
+    open func download(url: URL, options: Options = [.background], formatSelector: ((Info?) async -> [Format])? = nil) async throws -> URL {
         var (formats, info) = try extractInfo(url: url)
         
-        let title = info?.title ?? "No title"
+        let title = info?.title?.replacingOccurrences(of: "/", with: "_") ?? "No title"
         
         if let formatSelector = formatSelector {
             formats = await formatSelector(info)
@@ -315,6 +333,7 @@ open class YoutubeDL: NSObject {
     open func extractInfo(url: URL) throws -> ([Format], Info?) {
         print(#function, url)
         let info = try pythonObject.extract_info.throwing.dynamicallyCall(withKeywordArguments: ["": url.absoluteString, "download": false, "process": true])
+//        print(#function, "throttled:", pythonObject.throttled)
         
         let format_selector = pythonObject.build_format_selector(options["format"])
         let formats_to_download = format_selector(info)
@@ -395,7 +414,7 @@ open class YoutubeDL: NSObject {
         }
     }
     
-    open func transcode(url: URL) {
+    open func transcode(url: URL) async {
         DispatchQueue.main.async {
             guard UIApplication.shared.applicationState == .active else {
                 notify(body: NSLocalizedString("AskTranscode", comment: "Notification body"), identifier: NotificationRequestIdentifier.transcode.rawValue)
@@ -425,7 +444,7 @@ open class YoutubeDL: NSObject {
         }
         var ret: Int32?
 
-        func requestProgress() {
+        @Sendable func requestProgress() {
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
                 self.transcoder?.progressBlock = { progress in
                     self.transcoder?.progressBlock = nil
@@ -443,7 +462,7 @@ open class YoutubeDL: NSObject {
                     }
                 }
 
-                if ret == nil {
+                if self.transcoder != nil {
                     requestProgress()
                 }
             }
@@ -451,7 +470,7 @@ open class YoutubeDL: NSObject {
 
         requestProgress()
 
-        ret = transcoder?.transcode(from: url, to: outURL)
+        ret = await transcoder?.transcode(from: url, to: outURL)
 
         transcoder = nil
 
