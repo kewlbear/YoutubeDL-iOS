@@ -259,7 +259,7 @@ open class YoutubeDL: NSObject {
         try self.init(options: options ?? defaultOptions)
     }
         
-    open func download(url: URL, options: Options = [.background], formatSelector: ((Info?) async -> [Format])? = nil) async throws -> URL {
+    open func download(url: URL, options: Options = [.background, .chunked], formatSelector: ((Info?) async -> [Format])? = nil) async throws -> URL {
         var (formats, info) = try extractInfo(url: url)
         
         let title = info?.title?.replacingOccurrences(of: "/", with: "_") ?? "No title"

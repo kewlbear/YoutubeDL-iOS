@@ -27,7 +27,6 @@ import avformat
 import avfilter
 import swscale
 import swresample
-import FFmpegSupport
 
 open class Transcoder {
     open var isCancelled = false
@@ -143,7 +142,7 @@ open class Transcoder {
             }
             
             if dec_ctx.pointee.codec_type == AVMEDIA_TYPE_VIDEO || dec_ctx.pointee.codec_type == AVMEDIA_TYPE_AUDIO {
-                guard let encoder = avcodec_find_encoder(AV_CODEC_ID_H264) else { // FIXME: ...
+                guard let encoder = avcodec_find_encoder_by_name("h264_videotoolbox") else { // FIXME: ...
                     print("Necessary encoder not found")
                     return -19730225
                 }
@@ -171,6 +170,8 @@ open class Transcoder {
                 if (((ofmt_ctx?.pointee.oformat.pointee.flags ?? 0) & AVFMT_GLOBALHEADER) != 0) {
                     enc_ctx.pointee.flags |= AVFMT_GLOBALHEADER
                 }
+                
+                enc_ctx.pointee.bit_rate = dec_ctx.pointee.bit_rate
                 
                 var ret = avcodec_open2(enc_ctx, encoder, nil)
                 if ret < 0 {
@@ -386,9 +387,6 @@ open class Transcoder {
     }
     
     func transcode(from: URL, to url: URL) async -> Int32 {
-        let code = await FFmpegSupport.transcode(from: from, to: url)
-        return Int32(code)
-        
         var ret = open_input_file(filename: from.path)
         if ret < 0 {
             return ret

@@ -52,8 +52,7 @@ extension HTTPURLResponse {
 
 extension URLRequest {
     public mutating func setRange(start: Int64, fullSize: Int64) -> Int64 {
-        let random = (1..<(chunkSize * 95 / 100)).randomElement().map { start + $0 }
-        let end = random ?? (fullSize - 1)
+        let end = start + 10_485_760
         setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
         return end
     }
