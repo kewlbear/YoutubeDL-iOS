@@ -52,7 +52,7 @@ extension HTTPURLResponse {
 
 extension URLRequest {
     public mutating func setRange(start: Int64, fullSize: Int64) -> Int64 {
-        let end = start + 10_485_760
+        let end = start + chunkSize
         setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
         return end
     }

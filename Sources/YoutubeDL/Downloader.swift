@@ -43,7 +43,9 @@ open class Downloader: NSObject {
    
     public static let shared = Downloader(backgroundURLSessionIdentifier: "YoutubeDL-iOS")
     
-    open var session: URLSession = URLSession.shared
+    open lazy var session: URLSession = URLSession.shared
+    
+    var isDownloading = false
     
     let decimalFormatter = NumberFormatter()
     
@@ -103,9 +105,10 @@ open class Downloader: NSObject {
         currentRequest = request
         
         let task = session.downloadTask(with: request)
-        task.taskDescription = url.lastPathComponent
+        task.taskDescription = url.path
         task.priority = URLSessionTask.highPriority
         
+        isDownloading = true
         task.resume()
         return task
     }
@@ -150,9 +153,10 @@ extension Downloader: URLSessionDelegate {
 @available(iOS 12.0, *)
 extension Downloader: URLSessionTaskDelegate {
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            print(#function, session, task, error)
-        }
+        print(#function, session, task, error ?? "no error")
+//        if let error = error {
+//            print(#function, session, task, error)
+//        }
     }
 }
 
@@ -223,7 +227,9 @@ extension Downloader: URLSessionDownloadDelegate {
         )
         
         let kind = downloadTask.kind
-        let url = directory.appendingPathComponent(downloadTask.taskDescription ?? "complete.mp4")
+        let url = downloadTask.taskDescription.map {
+            URL(fileURLWithPath: $0)
+        } ?? directory.appendingPathComponent("complete.mp4")
 
         do {
             if range.isEmpty {

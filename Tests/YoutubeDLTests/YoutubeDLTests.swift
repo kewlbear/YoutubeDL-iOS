@@ -28,8 +28,8 @@ final class YoutubeDLTests: XCTestCase {
     func testExtractInfo() async throws {
         let youtubeDL = try await YoutubeDL()
         let (formats, info) = try youtubeDL.extractInfo(url: URL(string: "https://www.youtube.com/watch?v=WdFj7fUnmC0")!)
-        print(formats, info ?? "nil")
-        XCTAssertEqual(info?.title, "YoutubeDL iOS app demo")
+        print(formats, info)
+        XCTAssertEqual(info.title, "YoutubeDL iOS app demo")
         XCTAssertGreaterThan(formats.count, 0)
     }
 
@@ -65,6 +65,12 @@ final class YoutubeDLTests: XCTestCase {
         }
     }
 
+    func testPythonDecoder() async throws {
+        let youtubeDL = try await YoutubeDL()
+        let (formats, info) = try youtubeDL.extractInfo(url: URL(string: "https://www.youtube.com/watch?v=WdFj7fUnmC0")!)
+        print(formats, info)
+    }
+    
     static var allTests = [
         ("testExtractInfo", testExtractInfo),
     ]

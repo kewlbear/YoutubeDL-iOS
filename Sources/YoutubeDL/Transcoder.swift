@@ -24,498 +24,526 @@
 
 import CoreVideo
 import avformat
+import avcodec
+import avutil
 import avfilter
 import swscale
-import swresample
 
 open class Transcoder {
-    open var isCancelled = false
+    enum VideoSyncMethod {
+        case auto
+        case passthrough
+        case cfr
+        case vfr
+        case vscfr
+        case drop
+    }
     
-    var progressBlock: ((Double) -> Void)?
-    
-    var frameBlock: ((CVPixelBuffer) -> Void)?
-    
-    var ifmt_ctx: UnsafeMutablePointer<AVFormatContext>?
-    
-    var ofmt_ctx: UnsafeMutablePointer<AVFormatContext>?
+    struct StreamContext {
+        var dec_ctx: UnsafeMutablePointer<AVCodecContext>?
+        var enc_ctx: UnsafeMutablePointer<AVCodecContext>?
+        
+        var dec_frame: UnsafeMutablePointer<AVFrame>?
+    }
 
     struct FilteringContext {
         var buffersink_ctx: UnsafeMutablePointer<AVFilterContext>?
         var buffersrc_ctx: UnsafeMutablePointer<AVFilterContext>?
         var filter_graph: UnsafeMutablePointer<AVFilterGraph>?
+        
+        var enc_pkt: UnsafeMutablePointer<AVPacket>?
+        var filtered_frame: UnsafeMutablePointer<AVFrame>?
     }
 
-    var filter_ctx: [FilteringContext] = []
+    open var isCancelled = false
     
-    struct StreamContext {
-        var dec_ctx: UnsafeMutablePointer<AVCodecContext>?
-        var enc_ctx: UnsafeMutablePointer<AVCodecContext>?
+    var progressBlock: ((Double) -> Void)?
+    
+    var video_sync_method = VideoSyncMethod.auto
+    
+    @available(iOS 13.0, *)
+    func transcode(from: URL, to url: URL, timeRange: Range<Int64> = 0..<Int64.max) throws {
+        var (ifmt_ctx, stream_ctx) = try openInputFile(from.path)
+        defer {
+            for i in 0..<Int(ifmt_ctx!.pointee.nb_streams) {
+                avcodec_free_context(&stream_ctx[i].dec_ctx)
+            }
+            avformat_close_input(&ifmt_ctx)
+        }
+        
+        if timeRange.lowerBound > 0 {
+            var seek_timestamp = timeRange.lowerBound // FIXME: account for ifmt_ctx.pointee.start_time and so on
+        
+            if (ifmt_ctx!.pointee.flags & AVFMT_SEEK_TO_PTS) != 0 {
+                var dts_heuristic = false
+                for i in 0..<Int(ifmt_ctx!.pointee.nb_streams) {
+                    guard ifmt_ctx?.pointee.streams[i]?.pointee.codecpar.pointee.video_delay != 0 else { continue }
+                    dts_heuristic = true
+                    break
+                }
+                if dts_heuristic {
+                    seek_timestamp -= 3 * Int64(AV_TIME_BASE) / 23
+                }
+            }
+            
+            try check(avformat_seek_file(ifmt_ctx, -1, .min, seek_timestamp, seek_timestamp, 0), message: "\(from.lastPathComponent): could not seek to position \(seek_timestamp / Int64(AV_TIME_BASE))")
+        }
+        
+//        func check_recording_time(ost: UnsafeMutablePointer<AVCodecContext>) -> Bool {
+//            timeRange.upperBound == .max || av_compare_ts(ost.pointee.sy, <#T##tb_a: AVRational##AVRational#>, <#T##ts_b: Int64##Int64#>, <#T##tb_b: AVRational##AVRational#>)
+//        }
+        
+        let ofmt_ctx = try openOutputFile(url.path, ifmt_ctx: ifmt_ctx!, stream_ctx: &stream_ctx)
+        defer {
+            for i in 0..<Int(ifmt_ctx!.pointee.nb_streams) {
+                if ofmt_ctx.pointee.nb_streams > i && ofmt_ctx.pointee.streams[i] != nil && stream_ctx[i].enc_ctx != nil {
+                    avcodec_free_context(&stream_ctx[i].enc_ctx)
+                }
+            }
+            
+            if ofmt_ctx.pointee.oformat.pointee.flags & AVFMT_NOFILE != 0 {
+                avio_closep(&ofmt_ctx.pointee.pb)
+            }
+            avformat_free_context(ofmt_ctx)
+        }
+        
+        var filter_ctx = try initFilters(ifmt_ctx: ifmt_ctx!, stream_ctx: stream_ctx)
+        defer {
+            for i in 0..<Int(ifmt_ctx!.pointee.nb_streams) {
+                if filter_ctx[i].filter_graph != nil {
+                    avfilter_graph_free(&filter_ctx[i].filter_graph)
+                    av_packet_free(&filter_ctx[i].enc_pkt)
+                    av_frame_free(&filter_ctx[i].filtered_frame)
+                }
+            }
+        }
+        
+        var packet: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
+        guard packet != nil else {
+            throw FFmpegError.av_err(code: AVERROR(ENOMEM))
+        }
+        defer { av_packet_free(&packet) }
+        
+        while true {
+            let ret = av_read_frame(ifmt_ctx, packet)
+            guard ret >= 0 else {
+                av_log(nil, AV_LOG_ERROR, "Error occurred: \(FFmpegError.av_err(code: ret).errorDescription ?? "\(ret)")")
+                break
+            }
+            let stream_index = Int(packet!.pointee.stream_index)
+            av_log(nil, AV_LOG_DEBUG, "Demuxer gave frame of stream_index \(stream_index)")
+            
+            if filter_ctx[stream_index].filter_graph != nil {
+                let stream = stream_ctx[stream_index]
+                
+                av_log(nil, AV_LOG_DEBUG, "Going to reencode&filter the frame")
+                
+                av_packet_rescale_ts(packet, ifmt_ctx!.pointee.streams[stream_index]!.pointee.time_base, stream.dec_ctx!.pointee.time_base)
+                try check(avcodec_send_packet(stream.dec_ctx, packet), message: "Decoding failed")
+                
+                while true {
+                    let ret = avcodec_receive_frame(stream.dec_ctx, stream.dec_frame)
+                    if ret == AVERROR_EOF || ret == AVERROR(EAGAIN) { break }
+                    else if ret < 0 { throw FFmpegError.av_err(code: ret) }
+                    
+                    stream.dec_frame?.pointee.pts = stream.dec_frame!.pointee.best_effort_timestamp
+                    try filter_encode_write_frame(stream.dec_frame!, stream_index: stream_index, filter_ctx: filter_ctx, stream_ctx: stream_ctx, ofmt_ctx: ofmt_ctx)
+                }
+            } else {
+                av_packet_rescale_ts(packet, ifmt_ctx!.pointee.streams[stream_index]!.pointee.time_base, ofmt_ctx.pointee.streams[stream_index]!.pointee.time_base)
+                
+                try check(av_interleaved_write_frame(ofmt_ctx, packet))
+            }
+            av_packet_unref(packet)
+        }
+        
+        for i in 0..<Int(ifmt_ctx!.pointee.nb_streams) {
+            guard filter_ctx[i].filter_graph != nil else { continue }
+            try filter_encode_write_frame(nil, stream_index: i, filter_ctx: filter_ctx, stream_ctx: stream_ctx, ofmt_ctx: ofmt_ctx)
+            
+            try flush_encoder(stream_index: i, stream_ctx: stream_ctx, filter_ctx: filter_ctx, ofmt_ctx: ofmt_ctx)
+        }
+        
+        av_write_trailer(ofmt_ctx)
     }
-    
-    var stream_ctx: [StreamContext] = []
 
-    func open_input_file(filename: String) -> Int32 {
-        var ret = avformat_open_input(&ifmt_ctx, filename, nil, nil)
-        if ret < 0 {
-            print("Cannot open input file")
-            return ret
+    func openInputFile(_ filename: String) throws -> (UnsafeMutablePointer<AVFormatContext>?, [StreamContext]) {
+        var ifmt_ctx: UnsafeMutablePointer<AVFormatContext>?
+        try check(avformat_open_input(&ifmt_ctx, filename, nil, nil))
+        var shouldClose = true
+        defer {
+            if shouldClose {
+                avformat_close_input(&ifmt_ctx)
+            }
         }
         
-        ret = avformat_find_stream_info(ifmt_ctx, nil)
-        if ret < 0 {
-            print("Cannot find stream info")
-            return ret
-        }
-        
-        guard let ic = ifmt_ctx?.pointee else {
-            return -19730225
-        }
-        
-        stream_ctx = Array(repeating: StreamContext(), count: Int(ic.nb_streams))
-        
-        for index in 0..<Int(ic.nb_streams) {
-            guard let stream = ic.streams[index] else { return -19730225 }
-            guard let dec = avcodec_find_decoder(stream.pointee.codecpar.pointee.codec_id) else {
-                print("Failed to find decoder for stream #\(index)")
-                return -19730225
+        try check(avformat_find_stream_info(ifmt_ctx, nil))
+        var stream_ctx: [StreamContext] = []
+        for i in 0..<Int(ifmt_ctx!.pointee.nb_streams) {
+            let stream = ifmt_ctx?.pointee.streams[i]
+            guard let dec = avcodec_find_decoder(stream!.pointee.codecpar.pointee.codec_id) else {
+                throw FFmpegError.decoderNotFound
             }
             guard let codec_ctx = avcodec_alloc_context3(dec) else {
-                print("Failed to allocate the decoder context for stream #\(index)")
-                return -19730225
+                throw FFmpegError.av_err(code: AVERROR(ENOMEM))
             }
-            ret = avcodec_parameters_to_context(codec_ctx, stream.pointee.codecpar)
-            if ret < 0 {
-                print("Failed to copy decoder parameters to input decoder context for stream #\(index)")
-                return ret
-            }
-            if codec_ctx.pointee.codec_type == AVMEDIA_TYPE_VIDEO || codec_ctx.pointee.codec_type == AVMEDIA_TYPE_AUDIO {
+            try check(avcodec_parameters_to_context(codec_ctx, stream!.pointee.codecpar))
+            
+            switch codec_ctx.pointee.codec_type {
+            case AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_AUDIO:
                 if codec_ctx.pointee.codec_type == AVMEDIA_TYPE_VIDEO {
                     codec_ctx.pointee.framerate = av_guess_frame_rate(ifmt_ctx, stream, nil)
                 }
-                
-                var options: OpaquePointer?
-                // blueming - none: 3:10, auto: 2:15, 4: 2:01
-                // poong - auto: 7:06, 4: 7:02
-                // bbang - auto: 5:53
-                ret = av_dict_set(&options, "threads", "auto", 0)
-                
-                codec_ctx.pointee.get_format = { _, formats in
-                    guard var pointer = formats else { fatalError() }
-                    while pointer.pointee != AVPixelFormat(-1) {
-                        print("format:", pointer.pointee.rawValue)
-                        pointer += 1
-                    }
-                    return formats!.pointee
-                }
-                
-                ret = avcodec_open2(codec_ctx, dec, &options)
-                if ret < 0 {
-                    print("Failed to open decoder for stream #\(index)")
-                    return ret
-                }
+                try check(avcodec_open2(codec_ctx, dec, nil))
+            default: break
             }
-            stream_ctx[index].dec_ctx = codec_ctx
+            stream_ctx.append(StreamContext(dec_ctx: codec_ctx, enc_ctx: nil, dec_frame: av_frame_alloc()))
+            guard stream_ctx[i].dec_frame != nil else {
+                throw FFmpegError.av_err(code: AVERROR(ENOMEM))
+            }
         }
         
         av_dump_format(ifmt_ctx, 0, filename, 0)
-        
-        return 0
+        shouldClose = false
+        return (ifmt_ctx, stream_ctx)
     }
-    
-    func open_output_file(filename: String) -> Int32 {
-        avformat_alloc_output_context2(&ofmt_ctx, nil, nil, filename)
-        guard ofmt_ctx != nil else {
-            print("Could not create output context")
-            return -19730225
-        }
+
+    func openOutputFile(_ filename: String, ifmt_ctx: UnsafeMutablePointer<AVFormatContext>, stream_ctx: inout [StreamContext]) throws -> UnsafeMutablePointer<AVFormatContext> {
+        var ofmt_ctx: UnsafeMutablePointer<AVFormatContext>?
+        try check(avformat_alloc_output_context2(&ofmt_ctx, nil, nil, filename), message: "Could not create output context")
         
-        for index in 0..<Int(ifmt_ctx!.pointee.nb_streams) {
+        for i in 0..<Int(ifmt_ctx.pointee.nb_streams) {
             guard let out_stream = avformat_new_stream(ofmt_ctx, nil) else {
-                print("Failed allocating output stream")
-                return -19730225
+                av_log(nil, AV_LOG_ERROR, "Failed allocating output stream")
+                throw FFmpegError.unknown
             }
             
-            guard let in_stream = ifmt_ctx!.pointee.streams[index],
-                  let dec_ctx = stream_ctx[index].dec_ctx else
-            {
-                return -19730225
-            }
+            let in_stream = ifmt_ctx.pointee.streams[i]!
+            let dec_ctx = stream_ctx[i].dec_ctx!
             
-            if dec_ctx.pointee.codec_type == AVMEDIA_TYPE_VIDEO || dec_ctx.pointee.codec_type == AVMEDIA_TYPE_AUDIO {
-                guard let encoder = avcodec_find_encoder_by_name("h264_videotoolbox") else { // FIXME: ...
-                    print("Necessary encoder not found")
-                    return -19730225
+            let type = dec_ctx.pointee.codec_type
+            switch type {
+            case AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_AUDIO:
+                out_stream.pointee.codecpar.pointee.codec_id = AV_CODEC_ID_H264//av_guess_codec(ofmt_ctx!.pointee.oformat, nil, filename, nil, type)
+                
+                let qcr = avformat_query_codec(ofmt_ctx!.pointee.oformat, ofmt_ctx!.pointee.oformat.pointee.video_codec, 0)
+                assert(qcr >= 0)
+                
+                guard let encoder = avcodec_find_encoder(out_stream.pointee.codecpar.pointee.codec_id) else {
+                    av_log(nil, AV_LOG_FATAL, "Necessary encoder not found")
+                    throw FFmpegError.invalidData
                 }
                 guard let enc_ctx = avcodec_alloc_context3(encoder) else {
-                    print("Failed to allocate the encoder context")
-                    return -19730225
+                    av_log(nil, AV_LOG_FATAL, "Failed to allocate the encoder context")
+                    throw FFmpegError.av_err(code: AVERROR(ENOMEM))
                 }
                 
+                // FIXME: choose suitable properties?
                 if dec_ctx.pointee.codec_type == AVMEDIA_TYPE_VIDEO {
                     enc_ctx.pointee.height = dec_ctx.pointee.height
                     enc_ctx.pointee.width = dec_ctx.pointee.width
                     enc_ctx.pointee.sample_aspect_ratio = dec_ctx.pointee.sample_aspect_ratio
-                    enc_ctx.pointee.pix_fmt =
-//                        encoder.pointee.pix_fmts?.pointee ??
-                        dec_ctx.pointee.pix_fmt
+                    // FIXME: choose suitable format
+                    if encoder.pointee.pix_fmts != nil {
+                        enc_ctx.pointee.pix_fmt = encoder.pointee.pix_fmts.pointee
+                    } else {
+                        enc_ctx.pointee.pix_fmt = dec_ctx.pointee.pix_fmt
+                    }
                     enc_ctx.pointee.time_base = av_inv_q(dec_ctx.pointee.framerate)
                 } else {
                     enc_ctx.pointee.sample_rate = dec_ctx.pointee.sample_rate
                     enc_ctx.pointee.channel_layout = dec_ctx.pointee.channel_layout
                     enc_ctx.pointee.channels = av_get_channel_layout_nb_channels(enc_ctx.pointee.channel_layout)
+                    // FIXME: choose suitable format
                     enc_ctx.pointee.sample_fmt = encoder.pointee.sample_fmts.pointee
                     enc_ctx.pointee.time_base = AVRational(num: 1, den: enc_ctx.pointee.sample_rate)
                 }
                 
-                if (((ofmt_ctx?.pointee.oformat.pointee.flags ?? 0) & AVFMT_GLOBALHEADER) != 0) {
-                    enc_ctx.pointee.flags |= AVFMT_GLOBALHEADER
+                if (ofmt_ctx!.pointee.oformat.pointee.flags & AVFMT_GLOBALHEADER) != 0 {
+                    enc_ctx.pointee.flags |= AV_CODEC_FLAG_GLOBAL_HEADER
                 }
                 
-                enc_ctx.pointee.bit_rate = dec_ctx.pointee.bit_rate
-                
-                var ret = avcodec_open2(enc_ctx, encoder, nil)
-                if ret < 0 {
-                    print("Cannot open video encoder for stream #\(index)")
-                    return ret
-                }
-                ret = avcodec_parameters_from_context(out_stream.pointee.codecpar, enc_ctx)
-                if ret < 0 {
-                    print("Failed to copy encoder parameters to output stream #\(index)")
-                    return ret
-                }
+                // FIXME: pass settings to encoder
+                try check(avcodec_open2(enc_ctx, encoder, nil), message: "Cannot open video encoder for stream #\(i)")
+                try check(avcodec_parameters_from_context(out_stream.pointee.codecpar, enc_ctx), message: "Failed to copy encoder parameters to output stream #\(i)")
                 
                 out_stream.pointee.time_base = enc_ctx.pointee.time_base
-                stream_ctx[index].enc_ctx = enc_ctx
-            } else if dec_ctx.pointee.codec_type == AVMEDIA_TYPE_UNKNOWN {
-                print("Elementary stream #\(index) is of unknown type, cannot proceed")
-                return -19730225
-            } else {
-                let ret = avcodec_parameters_copy(out_stream.pointee.codecpar, in_stream.pointee.codecpar)
-                if ret < 0 {
-                    print("Copying parameters for stream #\(index) failed")
-                    return ret
-                }
+                stream_ctx[i].enc_ctx = enc_ctx
+            case AVMEDIA_TYPE_UNKNOWN:
+                av_log(nil, AV_LOG_FATAL, "Elementary stream #\(i) is of unknown type, cannot proceed")
+                throw FFmpegError.invalidData
+            default:
+                try check(avcodec_parameters_copy(out_stream.pointee.codecpar, in_stream.pointee.codecpar), message: "Copying parameters for stream #\(i) failed")
                 out_stream.pointee.time_base = in_stream.pointee.time_base
             }
         }
         av_dump_format(ofmt_ctx, 0, filename, 1)
         
-        if (((ofmt_ctx?.pointee.oformat.pointee.flags ?? 0) & AVFMT_NOFILE) == 0) {
-            let ret = avio_open(&ofmt_ctx!.pointee.pb, filename, AVIO_FLAG_WRITE)
-            if ret < 0 {
-                print("Could not open output file '\(filename)'")
-                return ret
-            }
+        if (ofmt_ctx!.pointee.oformat.pointee.flags & AVFMT_NOFILE) == 0 {
+            try check(avio_open(&ofmt_ctx!.pointee.pb, filename, AVIO_FLAG_WRITE), message: "Could not open output file '\(filename)'")
         }
         
-        let ret = avformat_write_header(ofmt_ctx, nil)
-        if ret < 0 {
-            print("Error occurred when opening output file")
-            return ret
-        }
+        try check(avformat_write_header(ofmt_ctx, nil), message: "Error occurred when opening output file")
         
-        return 0
+        return ofmt_ctx!
     }
-    
-    func init_filters() -> Int32 {
-        guard let ifmt_ctx = self.ifmt_ctx else {
-            return -9999
-        }
-        filter_ctx = Array(repeating: FilteringContext(), count: Int(ifmt_ctx.pointee.nb_streams))
+
+    func initFilters(ifmt_ctx: UnsafeMutablePointer<AVFormatContext>, stream_ctx: [StreamContext]) throws -> [FilteringContext] {
+        var filter_ctx: [FilteringContext] = []
         
-        for index in 0..<Int(ifmt_ctx.pointee.nb_streams) {
-            let codec_type = ifmt_ctx.pointee.streams[index]?.pointee.codecpar.pointee.codec_type
-            guard [AVMEDIA_TYPE_AUDIO, AVMEDIA_TYPE_VIDEO].contains(codec_type) else {
-                continue
+        for i in 0..<Int(ifmt_ctx.pointee.nb_streams) {
+            let type = ifmt_ctx.pointee.streams[i]?.pointee.codecpar.pointee.codec_type
+            guard type == AVMEDIA_TYPE_AUDIO || type == AVMEDIA_TYPE_VIDEO else { continue }
+            
+            let filter_spec: String
+            switch type {
+            case AVMEDIA_TYPE_VIDEO: filter_spec = "format=nv12,hwupload"
+            case AVMEDIA_TYPE_AUDIO: filter_spec = "anull"
+            default: fatalError()
             }
-            var filter_spec: String
-            if codec_type == AVMEDIA_TYPE_VIDEO {
-                filter_spec = "null"
-            } else {
-                filter_spec = "null"
+            filter_ctx.append(try init_filter(dec_ctx: stream_ctx[i].dec_ctx!, enc_ctx: stream_ctx[i].enc_ctx!, filter_spec: filter_spec))
+            
+            filter_ctx[i].enc_pkt = av_packet_alloc()
+            guard filter_ctx[i].enc_pkt != nil else {
+                throw FFmpegError.av_err(code: AVERROR(ENOMEM))
             }
-            let ret = init_filter(fctx: &filter_ctx[index], dec_ctx: stream_ctx[index].dec_ctx!, enc_ctx: stream_ctx[index].enc_ctx!, filter_spec: filter_spec)
-            guard ret == 0 else {
-                return ret
+            
+            filter_ctx[i].filtered_frame = av_frame_alloc()
+            guard filter_ctx[i].filtered_frame != nil else {
+                throw FFmpegError.av_err(code: AVERROR(ENOMEM))
             }
         }
         
-        return 0
+        return filter_ctx
     }
-    
-    func init_filter(fctx: UnsafeMutablePointer<FilteringContext>, dec_ctx: UnsafePointer<AVCodecContext>, enc_ctx: UnsafeMutablePointer<AVCodecContext>, filter_spec: String) -> Int32 {
-        var outputs: UnsafeMutablePointer<AVFilterInOut>? = avfilter_inout_alloc()
-        defer {
-            avfilter_inout_free(&outputs)
-        }
+
+    func init_filter(dec_ctx: UnsafeMutablePointer<AVCodecContext>,
+                     enc_ctx: UnsafeMutablePointer<AVCodecContext>,
+                     filter_spec: String) throws -> FilteringContext {
         var inputs: UnsafeMutablePointer<AVFilterInOut>? = avfilter_inout_alloc()
+        var outputs: UnsafeMutablePointer<AVFilterInOut>? = avfilter_inout_alloc()
+        guard outputs != nil && inputs != nil,
+              let filter_graph = avfilter_graph_alloc()
+        else {
+            throw FFmpegError.av_err(code: AVERROR(ENOMEM))
+        }
+        
         defer {
             avfilter_inout_free(&inputs)
-        }
-        guard outputs != nil && inputs != nil,
-              let filter_graph = avfilter_graph_alloc() else
-        {
-            return -999
+            avfilter_inout_free(&outputs)
         }
         
         var buffersrc_ctx: UnsafeMutablePointer<AVFilterContext>?
         var buffersink_ctx: UnsafeMutablePointer<AVFilterContext>?
-
+        
         switch dec_ctx.pointee.codec_type {
         case AVMEDIA_TYPE_VIDEO:
             guard let buffersrc = avfilter_get_by_name("buffer"),
-                  let buffersink = avfilter_get_by_name("buffersink") else
-            {
-                print("filtering source or sink element not found")
-                return -999
+                  let buffersink = avfilter_get_by_name("buffersink")
+            else {
+                av_log(nil, AV_LOG_ERROR, "filtering source or sink element not found")
+                throw FFmpegError.unknown
             }
+            
             let args = "video_size=\(dec_ctx.pointee.width)x\(dec_ctx.pointee.height):pix_fmt=\(dec_ctx.pointee.pix_fmt.rawValue):time_base=\(dec_ctx.pointee.time_base.num)/\(dec_ctx.pointee.time_base.den):pixel_aspect=\(dec_ctx.pointee.sample_aspect_ratio.num)/\(dec_ctx.pointee.sample_aspect_ratio.den)"
             
-            var ret = avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, nil, filter_graph)
-            if ret < 0 {
-                print("Cannot create buffer source")
-                return ret
-            }
+            try check(avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, nil, filter_graph), message: "Cannot create buffer source")
             
-            ret = avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", nil, nil, filter_graph)
-            if ret < 0 {
-                print("Cannot create buffer sink")
-                return ret
-            }
+            try check(avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", nil, nil, filter_graph), message: "Cannot create buffer sink")
             
-            let size = MemoryLayout<AVPixelFormat>.size
-            withUnsafePointer(to: enc_ctx.pointee.pix_fmt) {
-                $0.withMemoryRebound(to: UInt8.self, capacity: size) {
-                    ret = av_opt_set_bin(buffersink_ctx, "pix_fmts", $0, Int32(size), AV_OPT_SEARCH_CHILDREN)
+            let size = MemoryLayout.size(ofValue: enc_ctx.pointee.pix_fmt)
+            try withUnsafePointer(to: enc_ctx.pointee.pix_fmt) {
+                try $0.withMemoryRebound(to: UInt8.self, capacity: size) {
+                    try check(av_opt_set_bin(buffersink_ctx, "pix_fmts", $0, Int32(size), AV_OPT_SEARCH_CHILDREN), message: "Cannot set output pixel format")
                 }
             }
-            if ret < 0 {
-                return ret
+        case AVMEDIA_TYPE_AUDIO:
+            guard let buffersrc = avfilter_get_by_name("abuffer"),
+                  let buffersink = avfilter_get_by_name("abuffersink")
+            else {
+                av_log(nil, AV_LOG_ERROR, "filtering source or sink element not found")
+                throw FFmpegError.unknown
             }
+            
+            if dec_ctx.pointee.channel_layout == 0 {
+                dec_ctx.pointee.channel_layout = UInt64(av_get_default_channel_layout(dec_ctx.pointee.channels))
+            }
+            let args = "time_base=\(dec_ctx.pointee.time_base.num)/\(dec_ctx.pointee.time_base.den):sample_rate=\(dec_ctx.pointee.sample_rate):sample_fmt=\(av_get_sample_fmt_name(dec_ctx.pointee.sample_fmt)!):channel_layout=0x\(String(dec_ctx.pointee.channel_layout, radix: 16, uppercase: false))"
+            try check(avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, nil, filter_graph), message: "Cannot create audio buffer source")
+
+            try check(avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", nil, nil, filter_graph), message: "Cannot create audio buffer sink")
+
+            func av_opt_set_bin<T>(name: String, keyPath: WritableKeyPath<AVCodecContext, T>, message: String) throws {
+                let size = MemoryLayout.size(ofValue: enc_ctx.pointee[keyPath: keyPath])
+                try withUnsafePointer(to: enc_ctx.pointee[keyPath: keyPath]) {
+                    try $0.withMemoryRebound(to: UInt8.self, capacity: size) {
+                        try check(avutil.av_opt_set_bin(buffersink_ctx, name, $0, Int32(size), AV_OPT_SEARCH_CHILDREN), message: message)
+                    }
+                }
+            }
+            
+            try av_opt_set_bin(name: "sample_fmts", keyPath: \.sample_fmt, message: "Cannot set output sample format")
+
+            try av_opt_set_bin(name: "channel_layouts", keyPath: \.channel_layout, message: "Cannot set output channel layout")
+
+            try av_opt_set_bin(name: "sample_rates", keyPath: \.sample_rate, message: "Cannot set output sample rate")
         default:
-            fatalError()
+            throw FFmpegError.unknown
         }
         
-        outputs?.pointee.name = strdup("in")
+        outputs?.pointee.name = av_strdup("in")
         outputs?.pointee.filter_ctx = buffersrc_ctx
         outputs?.pointee.pad_idx = 0
         outputs?.pointee.next = nil
         
-        inputs?.pointee.name = strdup("out")
+        inputs?.pointee.name = av_strdup("out")
         inputs?.pointee.filter_ctx = buffersink_ctx
         inputs?.pointee.pad_idx = 0
         inputs?.pointee.next = nil
         
-        var ret = avfilter_graph_parse_ptr(filter_graph, filter_spec, &inputs, &outputs, nil)
-        if ret < 0 {
-            return ret
+        guard outputs?.pointee.name != nil && inputs?.pointee.name != nil else {
+            throw FFmpegError.av_err(code: AVERROR(ENOMEM))
         }
         
-        ret = avfilter_graph_config(filter_graph, nil)
-        if ret < 0 {
-            return ret
-        }
+        try check(avfilter_graph_parse_ptr(filter_graph, filter_spec, &inputs, &outputs, nil))
         
-        fctx.pointee.buffersrc_ctx = buffersrc_ctx
-        fctx.pointee.buffersink_ctx = buffersink_ctx
-        fctx.pointee.filter_graph = filter_graph
+        try check(avfilter_graph_config(filter_graph, nil))
         
-        return 0
+        return FilteringContext(
+            buffersink_ctx: buffersink_ctx,
+            buffersrc_ctx: buffersrc_ctx,
+            filter_graph: filter_graph)
     }
-    
-    func filter_encode_write_frame(frame: UnsafeMutablePointer<AVFrame>?, stream_index: Int) -> Int32 {
-        var ret = av_buffersrc_add_frame_flags(filter_ctx[stream_index].buffersrc_ctx, frame, 0)
-        if ret < 0 {
-            print("Error while feeding the filtergraph")
-            return ret
-        }
+
+    func filter_encode_write_frame(_ frame: UnsafeMutablePointer<AVFrame>?, stream_index: Int, filter_ctx: [FilteringContext], stream_ctx: [StreamContext], ofmt_ctx: UnsafeMutablePointer<AVFormatContext>) throws {
+        let filter = filter_ctx[stream_index]
+        
+        av_log(nil, AV_LOG_INFO, "Pushing decoded frame to filters")
+        try check(av_buffersrc_add_frame_flags(filter.buffersrc_ctx, frame, 0), message: "Error while feeding the filtergraph")
         
         while true {
-            var filt_frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
-            guard filt_frame != nil else {
-                return -999
-            }
-            ret = av_buffersink_get_frame(filter_ctx[stream_index].buffersink_ctx, filt_frame)
+            av_log(nil, AV_LOG_INFO, "Pulling filtered frame from filters")
+            let ret = av_buffersink_get_frame(filter.buffersink_ctx, filter.filtered_frame)
             if ret < 0 {
-                av_frame_free(&filt_frame)
-                return (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) ? 0 : ret
-            }
-            
-            filt_frame?.pointee.pict_type = AV_PICTURE_TYPE_NONE
-            var got_frame: Int32 = 0
-            ret = encode_write_frame(filt_frame: &filt_frame, stream_index: stream_index, got_frame: &got_frame)
-            if ret < 0 {
-                return ret
-            }
-        }
-    }
-
-    func encode_write_frame(filt_frame: UnsafeMutablePointer<UnsafeMutablePointer<AVFrame>?>?, stream_index: Int, got_frame: inout Int32) -> Int32 {
-        var enc_pkt = AVPacket()
-        av_init_packet(&enc_pkt)
-        let ret = avcodec_encode_video2(stream_ctx[stream_index].enc_ctx, &enc_pkt, filt_frame?.pointee, &got_frame)
-        av_frame_free(filt_frame)
-        if ret < 0 {
-            return ret
-        }
-        if got_frame == 0 {
-            return 0
-        }
-        
-        enc_pkt.stream_index = Int32(stream_index)
-        av_packet_rescale_ts(&enc_pkt, stream_ctx[stream_index].enc_ctx!.pointee.time_base, ofmt_ctx!.pointee.streams[stream_index]!.pointee.time_base)
-        
-        return av_interleaved_write_frame(ofmt_ctx, &enc_pkt)
-    }
-    
-    func flush_encoder(stream_index: Int) -> Int32 {
-        guard (stream_ctx[stream_index].enc_ctx!.pointee.codec.pointee.capabilities & AV_CODEC_CAP_DELAY) != 0 else {
-            return 0
-        }
-        
-        while true {
-            print("Flushing stream #\(stream_index) encoder")
-            var got_frame: Int32 = 0
-            let ret = encode_write_frame(filt_frame: nil, stream_index: stream_index, got_frame: &got_frame)
-            if ret < 0 {
-                return ret
-            }
-            if got_frame == 0 {
-                return 0
-            }
-        }
-    }
-    
-    func transcode(from: URL, to url: URL) async -> Int32 {
-        var ret = open_input_file(filename: from.path)
-        if ret < 0 {
-            return ret
-        }
-
-        ret = open_output_file(filename: url.path)
-        if ret < 0 {
-            return ret
-        }
-
-        ret = init_filters()
-        if ret < 0 {
-            return ret
-        }
-        
-        var packet = AVPacket()
-        
-        let formatter = DateComponentsFormatter()
-        let AV_TIME_BASE: Int32 = 1000_000
-        let AV_TIME_BASE_Q = AVRational(num: 1, den: AV_TIME_BASE)
-        
-        while !isCancelled {
-            ret = av_read_frame(ifmt_ctx, &packet)
-            if ret < 0 {
+                guard ret == AVERROR(EAGAIN) || ret == AVERROR_EOF else {
+                    throw FFmpegError.av_err(code: ret)
+                }
                 break
             }
-            let stream_index = Int(packet.stream_index)
-            let type = ifmt_ctx?.pointee.streams[stream_index]?.pointee.codecpar.pointee.codec_type
             
-            var frame = av_frame_alloc()
-            guard frame != nil else {
-                return ret
-            }
-            av_packet_rescale_ts(&packet, ifmt_ctx!.pointee.streams[stream_index]!.pointee.time_base, stream_ctx[stream_index].dec_ctx!.pointee.time_base)
-            let dec_func = type == AVMEDIA_TYPE_VIDEO ? avcodec_decode_video2 : avcodec_decode_audio4
-            var got_frame: Int32 = 0
-            ret = dec_func(stream_ctx[stream_index].dec_ctx, frame!, &got_frame, &packet)
-            if ret < 0 {
-                av_frame_free(&frame)
-                print("Decoding failed")
-                return ret
-            }
-            
-            if got_frame != 0 {
-                frame?.pointee.pts = frame!.pointee.best_effort_timestamp
-                
-                if frameBlock != nil && frame?.pointee.format == AV_PIX_FMT_YUV420P.rawValue,
-                   let frame = frame {
-                    var planeBaseAddress: [UnsafeMutableRawPointer?] = [UnsafeMutableRawPointer(frame.pointee.data.0), UnsafeMutableRawPointer(frame.pointee.data.1), UnsafeMutableRawPointer(frame.pointee.data.2)]
-                    var planeWidth: [Int] = [Int(frame.pointee.width), Int(frame.pointee.width + 1) / 2, Int(frame.pointee.width + 1) / 2]
-                    var planeHeight: [Int] = [Int(frame.pointee.height), Int(frame.pointee.height + 1) / 2, Int(frame.pointee.height + 1) / 2]
-                    var planeBytesPerRow: [Int] = [Int(frame.pointee.linesize.0), Int(frame.pointee.linesize.1), Int(frame.pointee.linesize.2)]
-                    var pixelBuffer: CVPixelBuffer?
-                    let ret = CVPixelBufferCreateWithPlanarBytes(nil, Int(frame.pointee.width), Int(frame.pointee.height), kCVPixelFormatType_420YpCbCr8Planar, nil, 0, 3, &planeBaseAddress, &planeWidth, &planeHeight, &planeBytesPerRow, nil, nil, nil, &pixelBuffer)
-                    print(ret, pixelBuffer ?? "nil")
-                    
-                    pixelBuffer.map { frameBlock?($0) }
-                }
-                
-                ret = filter_encode_write_frame(frame: frame, stream_index: stream_index)
-                av_frame_free(&frame)
-                if ret < 0 {
-                    return ret
-                }
+            filter.filtered_frame?.pointee.pict_type = AV_PICTURE_TYPE_NONE
+            defer { av_frame_unref(filter.filtered_frame)}
+            try encode_write_frame(stream_index: stream_index, flush: false, stream_ctx: stream_ctx, filter_ctx: filter_ctx, ofmt_ctx: ofmt_ctx)
+        }
+    }
 
-                if progressBlock != nil,
-                   let duration = ifmt_ctx?.pointee.duration,
-                   let stream = ofmt_ctx?.pointee.streams[stream_index] {
-                    let pts = av_rescale_q(av_stream_get_end_pts(stream), stream.pointee.time_base, AV_TIME_BASE_Q)
-                    let progress = Double(pts) / Double(duration)
-                    
-                    let t = TimeInterval(pts) / TimeInterval(AV_TIME_BASE)
-                    print(#function, "time =", formatter.string(from: t) ?? "?", progress)
-                    
-                    progressBlock?(progress)
-                }
-            } else {
-                av_frame_free(&frame)
-            }
-            av_packet_unref(&packet)
-        }
-
-        for index in 0..<Int(ifmt_ctx!.pointee.nb_streams) {
-            if filter_ctx[index].filter_graph == nil {
-                continue
-            }
-            ret = filter_encode_write_frame(frame: nil, stream_index: index)
-            if ret < 0 {
-                print("Flushing filter failed")
-                return ret
+    func encode_write_frame(stream_index: Int, flush: Bool, stream_ctx: [StreamContext], filter_ctx: [FilteringContext], ofmt_ctx: UnsafeMutablePointer<AVFormatContext>) throws {
+        let stream = stream_ctx[stream_index]
+        let filter = filter_ctx[stream_index]
+        let filt_frame = flush ? nil : filter.filtered_frame
+        let enc_pkt = filter.enc_pkt
+        
+        av_log(nil, AV_LOG_INFO, "Encoding frame")
+        av_packet_unref(enc_pkt)
+        
+        try check(avcodec_send_frame(stream.enc_ctx, filt_frame))
+        
+        while true {
+            let ret = avcodec_receive_packet(stream.enc_ctx, enc_pkt)
+            
+            if ret == AVERROR(EAGAIN) || ret == AVERROR_EOF {
+                return
             }
             
-            ret = flush_encoder(stream_index: index)
-            if ret < 0 {
-                print("Flushing encoder failed")
-                return ret
-            }
+            enc_pkt?.pointee.stream_index = Int32(stream_index)
+            av_packet_rescale_ts(enc_pkt, stream.enc_ctx!.pointee.time_base, ofmt_ctx.pointee.streams[stream_index]!.pointee.time_base)
+            
+            av_log(nil, AV_LOG_DEBUG, "Muxing frame")
+            try check(av_interleaved_write_frame(ofmt_ctx, enc_pkt))
         }
+    }
+
+    func flush_encoder(stream_index: Int, stream_ctx: [StreamContext], filter_ctx: [FilteringContext], ofmt_ctx: UnsafeMutablePointer<AVFormatContext>) throws {
+        guard stream_ctx[stream_index].enc_ctx!.pointee.codec.pointee.capabilities & AV_CODEC_CAP_DELAY != 0 else { return }
         
-        av_write_trailer(ofmt_ctx)
-        
-        av_packet_unref(&packet)
-        for index in 0..<Int(ifmt_ctx?.pointee.nb_streams ?? 0) {
-            avcodec_free_context(&stream_ctx[index].dec_ctx)
-            if ofmt_ctx?.pointee.nb_streams ?? 0 > index && ofmt_ctx?.pointee.streams[index] != nil && (stream_ctx[index].enc_ctx != nil) {
-                avcodec_free_context(&stream_ctx[index].enc_ctx)
-            }
-            if filter_ctx[index].filter_graph != nil {
-                avfilter_graph_free(&filter_ctx[index].filter_graph)
-            }
-        }
-        avformat_close_input(&ifmt_ctx)
-        if (((ofmt_ctx?.pointee.oformat.pointee.flags ?? 0) & AVFMT_NOFILE) == 0) {
-            avio_closep(&ofmt_ctx!.pointee.pb)
-        }
-        avformat_free_context(ofmt_ctx)
-        
-        if ret < 0 {
-            var buffer: [Int8] = Array(repeating: 0, count: 1024)
-            let message = String(utf8String: av_make_error_string(&buffer, buffer.count, ret))
-            print("Error occurred: \(message ?? "nil?")")
-        }
-        
-        return ret
+        av_log(nil, AV_LOG_INFO, "Flushing stream #\(stream_index) encoder")
+        try encode_write_frame(stream_index: stream_index, flush: true, stream_ctx: stream_ctx, filter_ctx: filter_ctx, ofmt_ctx: ofmt_ctx)
+    }
+
+}
+
+@available(iOS 13.0, *)
+public func transcode(from: URL, to url: URL) throws {
+    try Transcoder().transcode(from: from, to: url)
+}
+
+struct StreamContext {
+    var dec_ctx: UnsafeMutablePointer<AVCodecContext>?
+    var enc_ctx: UnsafeMutablePointer<AVCodecContext>?
+    
+    var dec_frame: UnsafeMutablePointer<AVFrame>?
+}
+
+struct FilteringContext {
+    var buffersink_ctx: UnsafeMutablePointer<AVFilterContext>?
+    var buffersrc_ctx: UnsafeMutablePointer<AVFilterContext>?
+    var filter_graph: UnsafeMutablePointer<AVFilterGraph>?
+    
+    var enc_pkt: UnsafeMutablePointer<AVPacket>?
+    var filtered_frame: UnsafeMutablePointer<AVFrame>?
+}
+
+let AVERROR_EOF = FFERRTAG("E", "O", "F", " ")
+
+enum FFmpegError: LocalizedError {
+    case av_err(code: Int32)
+    
+    static let decoderNotFound: Self = .av_err(code: FFERRTAG("\u{F8}", "D", "E", "C"))
+    static let unknown: Self = .av_err(code: FFERRTAG("U", "N", "K", "N"))
+    static let invalidData: Self = .av_err(code: FFERRTAG("I", "N", "D", "A"))
+    
+    var errorDescription: String? {
+        guard case .av_err(let code) = self else { fatalError() }
+        var buffer = [CChar](repeating: 0, count: 1024)
+        let ret = av_strerror(code, &buffer, buffer.count)
+        return ret == 0 ? String(cString: buffer, encoding: .utf8) : "Error \(code) (av_strerror=\(ret))"
     }
 }
 
-func AVERROR(_ e: Int32) -> Int32 {
-    -e
+let logLevels = [
+    AV_LOG_QUIET: "QUIET",
+    AV_LOG_PANIC: "PANIC",
+    AV_LOG_FATAL: "FATAL",
+    AV_LOG_ERROR: "ERROR",
+    AV_LOG_WARNING: "WARNING",
+    AV_LOG_INFO: "INFO",
+    AV_LOG_VERBOSE: "VERBOSE",
+    AV_LOG_DEBUG: "DEBUG",
+    AV_LOG_TRACE: "TRACE",
+]
+
+func av_log(_ avcl: Any?, _ level: Int32, _ fmt: String, function: String = #function) {
+    guard level > AV_LOG_QUIET else { return }
+    print(logLevels[level] ?? level, function, fmt)
 }
 
-let AVERROR_EOF: Int32 = -541478725
+func MKTAG(_ a: Character, _ b: Character, _ c: Character, _ d: Character) -> Int32 {
+    func i(_ c: Character) -> Int32 { Int32(c.asciiValue!) }
+    return i(a) | i(b) << 8 | i(c) << 16 | i(d) << 24
+}
+
+func FFERRTAG(_ a: Character, _ b: Character, _ c: Character, _ d: Character) -> Int32 {
+    -MKTAG(a, b, c, d)
+}
+
+func AVERROR(_ e: Int32) -> Int32 { EDOM > 0 ? -e : e }
+
+func check(_ expression: @autoclosure () -> Int32, message: String? = nil, function: String = #function) throws {
+    let error = expression()
+    if error < 0 {
+        if let message = message {
+            print(function, message)
+        }
+        throw FFmpegError.av_err(code: error)
+    }
+}
