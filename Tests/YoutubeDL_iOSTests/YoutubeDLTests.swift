@@ -24,7 +24,7 @@ import XCTest
 @testable import YoutubeDL
 import PythonKit
 
-final class YoutubeDLTests: XCTestCase {
+final class YoutubeDL_iOSTests: XCTestCase {
     func testExtractInfo() async throws {
         let youtubeDL = try await YoutubeDL()
         let (formats, info) = try youtubeDL.extractInfo(url: URL(string: "https://www.youtube.com/watch?v=WdFj7fUnmC0")!)

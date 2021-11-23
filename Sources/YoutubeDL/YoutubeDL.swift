@@ -31,6 +31,41 @@ public struct Info: Codable {
     public var id: String
     public var title: String
     public var formats: [Format]
+    public var description: String
+    public var upload_date: String
+    public var uploader: String
+    public var uploader_id: String
+    public var uploader_url: String
+    public var channel_id: String
+    public var channel_url: String
+    public var duration: Int
+    public var view_count: Int
+    public var average_rating: Double
+    public var age_limit: Int
+    public var webpage_url: String
+    public var categories: [String]
+    public var tags: [String]
+    public var playable_in_embed: Bool
+    public var is_live: Bool
+    public var was_live: Bool
+    public var live_status: String
+    public var release_timestamp: String?
+    public var chapters: [String]?
+    public var like_count: Int
+    public var channel: String
+    public var availability: String
+    public var __post_extractor: String?
+    public var original_url: String
+    public var webpage_url_basename: String
+    public var extractor: String
+    public var extractor_key: String
+    public var playlist: [String]?
+    public var playlist_index: Int?
+    public var thumbnail: String
+    public var display_id: String
+    public var duration_string: String
+    public var requested_subtitles: [String]?
+    public var __has_drm: Bool
 }
 
 public extension Info {
@@ -125,6 +160,7 @@ open class YoutubeDL: NSObject {
         var directory: URL
         var safeTitle: String
         var options: Options
+        var timeRange: Range<TimeInterval>?
     }
     
     public static var shouldDownloadPythonModule: Bool {
@@ -274,21 +310,23 @@ open class YoutubeDL: NSObject {
         try self.init(options: options ?? defaultOptions)
     }
         
-    public typealias FormatSelector = (Info) async -> ([Format], URL?)
+    public typealias FormatSelector = (Info) async -> ([Format], URL?, Range<TimeInterval>?)
     
     open func download(url: URL, options: Options = [.background, .chunked], formatSelector: FormatSelector? = nil) async throws -> URL {
         var (formats, info) = try extractInfo(url: url)
         
         var directory: URL?
+        var timeRange: Range<TimeInterval>?
         if let formatSelector = formatSelector {
-            (formats, directory) = await formatSelector(info)
+            (formats, directory, timeRange) = await formatSelector(info)
             guard !formats.isEmpty else { throw YoutubeDLError.canceled }
         }
         
         pendingDownloads.append(Download(formats: formats,
                                          directory: directory ?? downloadsDirectory,
                                          safeTitle: info.safeTitle,
-                                         options: options))
+                                         options: options,
+                                         timeRange: timeRange))
         
         _ = postDownloadTask
         

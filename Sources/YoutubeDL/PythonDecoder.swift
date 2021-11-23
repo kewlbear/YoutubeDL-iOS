@@ -51,7 +51,7 @@ struct _KeyedDecodingContainer<Key: CodingKey>: KeyedDecodingContainerProtocol {
     }
     
     func decode(_ type: Bool.Type, forKey key: Key) throws -> Bool {
-        fatalError()
+        Bool(self[key])!
     }
     
     func decode(_ type: String.Type, forKey key: Key) throws -> String {
