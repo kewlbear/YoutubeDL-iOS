@@ -30,7 +30,7 @@ open class Transcoder {
     
     @available(iOS 13.0, *)
     func transcode(from: URL, to url: URL, timeRange: Range<Int64> = 0..<Int64.max) throws {
-        let ret = ffmpeg(["FFmpeg-iOS", "-i", from.path, url.path])
+        let ret = ffmpeg("FFmpeg-iOS", "-i", from.path, url.path)
         print(#function, ret)
     }
 }
