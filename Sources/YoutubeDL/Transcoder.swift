@@ -25,12 +25,91 @@
 import Foundation
 import FFmpegSupport
 
+public typealias TimeRange = Range<TimeInterval>
+
 open class Transcoder {
     var progressBlock: ((Double) -> Void)?
     
     @available(iOS 13.0, *)
-    func transcode(from: URL, to url: URL, timeRange: Range<Int64> = 0..<Int64.max) throws {
-        let ret = ffmpeg("FFmpeg-iOS", "-i", from.path, url.path)
+    func transcode(from: URL, to url: URL, timeRange: TimeRange?, bitRate: Double?) throws {
+        let pipe = Pipe()
+        Task {
+            if #available(iOS 15.0, *) {
+                var info = [String: String]()
+                let maxTime: Double
+                if let timeRange = timeRange {
+                    maxTime = (timeRange.upperBound - timeRange.lowerBound) * 1_000_000
+                } else {
+                    maxTime = 1_000_000 // FIXME: probe?
+                }
+                for try await line in pipe.fileHandleForReading.bytes.lines {
+                    //                    print(#function, line)
+                    let components = line.split(separator: "=")
+                    assert(components.count == 2)
+                    let key = String(components[0])
+                    info[key] = String(components[1])
+                    if key == "progress" {
+                        print(#function, info)
+                        if let time = Int(info["out_time_us"] ?? "") {
+                            progressBlock?(Double(time) / maxTime)
+                        }
+                        info.removeAll()
+                    }
+                }
+            } else {
+                // Fallback on earlier versions
+            }
+        }
+        
+        var args = [
+            "FFmpeg-iOS",
+            "-progress", "pipe:\(pipe.fileHandleForWriting.fileDescriptor)",
+        ]
+        
+        if let timeRange = timeRange {
+            args += [
+                "-ss", "\(timeRange.lowerBound)",
+                "-t", "\(timeRange.upperBound - timeRange.lowerBound)",
+            ]
+        }
+        
+        args += [
+            "-i", from.path,
+        ]
+        
+        if let bitRate = bitRate {
+            args += [
+                "-b:v", "\(Int(bitRate))k",
+            ]
+        }
+        
+        args += [
+            "-c:v", "h264_videotoolbox",
+            url.path,
+        ]
+        
+        let ret = ffmpeg(args)
         print(#function, ret)
     }
+}
+
+public func format(_ seconds: Int) -> String? {
+    guard seconds >= 0 else {
+        print(#function, "invalid seconds:", seconds)
+        return nil
+    }
+    
+    let (minutes, sec) = seconds.quotientAndRemainder(dividingBy: 60)
+    var string = "\(sec)"
+    guard minutes > 0 else {
+        return string
+    }
+    
+    let (hours, min) = minutes.quotientAndRemainder(dividingBy: 60)
+    string = "\(min):" + (sec < 10 ? "0" : "") + string
+    guard hours > 0 else {
+        return string
+    }
+    
+    return "\(hours):" + (min < 10 ? "0" : "") + string
 }

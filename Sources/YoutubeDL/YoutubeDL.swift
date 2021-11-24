@@ -49,8 +49,15 @@ public struct Info: Codable {
     public var is_live: Bool
     public var was_live: Bool
     public var live_status: String
-    public var release_timestamp: String?
-    public var chapters: [String]?
+    public var release_timestamp: Int?
+    
+    public struct Chapter: Codable {
+        public var title: String
+        public var start_time: TimeInterval
+        public var end_time: TimeInterval
+    }
+    
+    public var chapters: [Chapter]?
     public var like_count: Int
     public var channel: String
     public var availability: String
@@ -90,6 +97,7 @@ public struct Format: Codable {
     public var acodec: String
     public var dynamic_range: String?
     public var abr: Double?
+    public var vbr: Double?
     
     public struct DownloaderOptions: Codable {
         public var http_chunk_size: Int
@@ -160,7 +168,8 @@ open class YoutubeDL: NSObject {
         var directory: URL
         var safeTitle: String
         var options: Options
-        var timeRange: Range<TimeInterval>?
+        var timeRange: TimeRange?
+        var bitRate: Double?
     }
     
     public static var shouldDownloadPythonModule: Bool {
@@ -232,11 +241,8 @@ open class YoutubeDL: NSObject {
             case .complete:
                 export(url)
             case .videoOnly, .audioOnly:
+                await transcode(directory: url.deletingLastPathComponent())
                 finishedContinuation?.yield(url)
-                guard transcoder == nil else {
-                    break
-                }
-//                tryMerge(title: url.title)
             case .otherVideo:
 //                await transcode(url: url)
                 break
@@ -310,23 +316,27 @@ open class YoutubeDL: NSObject {
         try self.init(options: options ?? defaultOptions)
     }
         
-    public typealias FormatSelector = (Info) async -> ([Format], URL?, Range<TimeInterval>?)
+    public typealias FormatSelector = (Info) async -> ([Format], URL?, TimeRange?, Double?)
     
     open func download(url: URL, options: Options = [.background, .chunked], formatSelector: FormatSelector? = nil) async throws -> URL {
         var (formats, info) = try extractInfo(url: url)
         
         var directory: URL?
         var timeRange: Range<TimeInterval>?
+        let bitRate: Double?
         if let formatSelector = formatSelector {
-            (formats, directory, timeRange) = await formatSelector(info)
+            (formats, directory, timeRange, bitRate) = await formatSelector(info)
             guard !formats.isEmpty else { throw YoutubeDLError.canceled }
+        } else {
+            bitRate = formats[0].vbr
         }
         
         pendingDownloads.append(Download(formats: formats,
                                          directory: directory ?? downloadsDirectory,
                                          safeTitle: info.safeTitle,
                                          options: options,
-                                         timeRange: timeRange))
+                                         timeRange: timeRange,
+                                         bitRate: bitRate))
         
         _ = postDownloadTask
         
@@ -360,18 +370,14 @@ open class YoutubeDL: NSObject {
     }
     
     func processPendingDownload() {
-        guard let download = pendingDownloads.first else {
+        guard let index = pendingDownloads.firstIndex(where: { !$0.formats.isEmpty }) else {
             return
         }
 
-        let format: Format
-        if download.formats.count > 1 {
-            format = pendingDownloads[0].formats.remove(at: 0)
-        } else {
-            format = pendingDownloads.remove(at: 0).formats[0]
-        }
+        let format = pendingDownloads[index].formats.remove(at: 0)
         
         Task {
+            let download = pendingDownloads[index]
             try await self.download(format: format, chunked: download.options.contains(.chunked), directory: download.directory, title: download.safeTitle)
         }
     }
@@ -439,11 +445,11 @@ open class YoutubeDL: NSObject {
         return (formats, try decoder.decode(Info.self, from: info))
     }
     
-    func tryMerge(title: String) {
+    func tryMerge(directory: URL, title: String, timeRange: TimeRange?) {
         let t0 = ProcessInfo.processInfo.systemUptime
        
-        let videoURL = makeURL(title: title, kind: .videoOnly, ext: "mp4")
-        let audioURL: URL = makeURL(title: title, kind: .audioOnly, ext: "m4a")
+        let videoURL = makeURL(directory: directory, title: title, kind: .videoOnly, ext: "mp4")
+        let audioURL: URL = makeURL(directory: directory, title: title, kind: .audioOnly, ext: "m4a")
         let videoAsset = AVAsset(url: videoURL)
         let audioAsset = AVAsset(url: audioURL)
         
@@ -461,8 +467,15 @@ open class YoutubeDL: NSObject {
         
         do {
             try videoCompositionTrack?.insertTimeRange(CMTimeRange(start: .zero, duration: videoAssetTrack.timeRange.duration), of: videoAssetTrack, at: .zero)
-            try audioCompositionTrack?.insertTimeRange(CMTimeRange(start: .zero, duration: audioAssetTrack.timeRange.duration), of: audioAssetTrack, at: .zero)
-            print(#function, videoAssetTrack.timeRange, audioAssetTrack.timeRange)
+            let range: CMTimeRange
+            if let timeRange = timeRange {
+                range = CMTimeRange(start: CMTime(seconds: timeRange.lowerBound, preferredTimescale: 1),
+                                    end: CMTime(seconds: timeRange.upperBound, preferredTimescale: 1))
+            } else {
+                range = CMTimeRange(start: .zero, duration: audioAssetTrack.timeRange.duration)
+            }
+            try audioCompositionTrack?.insertTimeRange(range, of: audioAssetTrack, at: .zero)
+            print(#function, videoAssetTrack.timeRange, range)
         }
         catch {
             print(#function, error)
@@ -507,7 +520,12 @@ open class YoutubeDL: NSObject {
         }
     }
     
-    open func transcode(url: URL) async {
+    open func transcode(directory: URL) async {
+        guard let download = pendingDownloads.first(where: { $0.directory.path == directory.path }) else {
+            print(#function, "no download with", directory, pendingDownloads.map(\.directory))
+            return
+        }
+        
         DispatchQueue.main.async {
             guard UIApplication.shared.applicationState == .active else {
                 notify(body: NSLocalizedString("AskTranscode", comment: "Notification body"), identifier: NotificationRequestIdentifier.transcode.rawValue)
@@ -519,7 +537,8 @@ open class YoutubeDL: NSObject {
 //            self.topViewController?.present(alert, animated: true, completion: nil)
         }
        
-        let outURL = makeURL(directory: url.deletingLastPathComponent(), title: url.title, kind: .videoOnly, ext: "mp4")
+        let url = makeURL(directory: directory, title: download.safeTitle, kind: .otherVideo, ext: "webm") // FIXME: ext
+        let outURL = makeURL(directory: directory, title: download.safeTitle, kind: .videoOnly, ext: "mp4")
         
         removeItem(at: outURL)
 
@@ -563,13 +582,13 @@ open class YoutubeDL: NSObject {
 
         requestProgress()
 
-        try? transcoder?.transcode(from: url, to: outURL)
+        try? transcoder?.transcode(from: url, to: outURL, timeRange: download.timeRange, bitRate: download.bitRate)
 
         transcoder = nil
 
         print(#function, ret ?? "nil?", "took", downloader.dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
 
-        guard ret == 0 else { return }
+//        guard ret == 0 else { return }
         
         if !keepIntermediates {
             removeItem(at: url)
@@ -577,7 +596,7 @@ open class YoutubeDL: NSObject {
         
         notify(body: NSLocalizedString("FinishedTranscoding", comment: "Notification body"))
 
-        tryMerge(title: url.title)
+        tryMerge(directory: url.deletingLastPathComponent(), title: url.title, timeRange: download.timeRange)
     }
     
     internal func export(_ url: URL) {
