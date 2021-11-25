@@ -27,6 +27,15 @@ import AVFoundation
 import Photos
 import UIKit
 
+// https://github.com/pvieito/PythonKit/pull/30#issuecomment-751132191
+let RTLD_DEFAULT = UnsafeMutableRawPointer(bitPattern: -2)
+
+func loadSymbol<T>(_ name: String) -> T {
+    unsafeBitCast(dlsym(RTLD_DEFAULT, name), to: T.self)
+}
+
+let Py_IsInitialized: @convention(c) () -> Int32 = loadSymbol("Py_IsInitialized")
+
 public struct Info: Codable {
     public var id: String
     public var title: String
@@ -133,21 +142,18 @@ public extension Format {
     var isVideoOnly: Bool { acodec == "none" }
 }
 
-public let defaultOptions: PythonObject = [
+public let defaultOptions: [String: Any] = [
     "format": "bestvideo,bestaudio[ext=m4a]",
     "nocheckcertificate": true,
     "verbose": true,
 ]
 
 public enum YoutubeDLError: Error {
+    case noPythonModule
     case canceled
 }
 
 open class YoutubeDL: NSObject {
-    public enum Error: Swift.Error {
-        case noPythonModule
-    }
-    
     public struct Options: OptionSet, Codable {
         public let rawValue: Int
         
@@ -177,7 +183,7 @@ open class YoutubeDL: NSObject {
             _ = try YoutubeDL()
             return false
         }
-        catch Error.noPythonModule {
+        catch YoutubeDLError.noPythonModule {
             return true
         }
         catch {
@@ -206,7 +212,7 @@ open class YoutubeDL: NSObject {
     
     open var transcoder: Transcoder?
     
-    public let version: String?
+    public var version: String?
     
     public lazy var downloader = Downloader.shared
     
@@ -216,9 +222,9 @@ open class YoutubeDL: NSObject {
         didSet { downloader.directory = downloadsDirectory }
     }
     
-    internal let pythonObject: PythonObject
+    internal var pythonObject: PythonObject?
 
-    internal let options: PythonObject
+    internal var options: [String: Any]
     
     lazy var finished: AsyncStream<URL> = {
         AsyncStream { continuation in
@@ -258,9 +264,13 @@ open class YoutubeDL: NSObject {
     
     var pendingDownloadsURL: URL { downloadsDirectory.appendingPathComponent("PendingDownloads.json") }
     
-    public init(options: PythonObject = defaultOptions) throws {
+    public init(options: [String: Any]? = defaultOptions) {
+        self.options = options
+    }
+    
+    func makePythonObject(options: PythonObject = defaultOptions) throws -> PythonObject {
         guard FileManager.default.fileExists(atPath: Self.pythonModuleURL.path) else {
-            throw Error.noPythonModule
+            throw YoutubeDLError.noPythonModule
         }
         
         let sys = try Python.attemptImport("sys")
@@ -296,24 +306,26 @@ open class YoutubeDL: NSObject {
         let pythonModule = try Python.attemptImport("yt_dlp")
         pythonObject = pythonModule.YoutubeDL(options)
         
-        self.options = options ?? defaultOptions
+        self.options = options
         
         version = String(pythonModule.version.__version__)
+        
+        return pythonObject!
     }
     
-    public convenience init(_ options: PythonObject? = nil, initializePython: Bool = true, downloadPythonModule: Bool = true) async throws {
-        if initializePython {
+    func makePythonObject(_ options: PythonObject? = nil, initializePython: Bool = true, downloadPythonModule: Bool = true) async throws -> PythonObject {
+        if Py_IsInitialized() == 0 {
             PythonSupport.initialize()
         }
         
         if !FileManager.default.fileExists(atPath: Self.pythonModuleURL.path) {
             guard downloadPythonModule else {
-                throw Error.noPythonModule
+                throw YoutubeDLError.noPythonModule
             }
             try await Self.downloadPythonModule()
         }
         
-        try self.init(options: options ?? defaultOptions)
+        return try makePythonObject(options: options ?? defaultOptions)
     }
         
     public typealias FormatSelector = (Info) async -> ([Format], URL?, TimeRange?, Double?)
@@ -429,6 +441,13 @@ open class YoutubeDL: NSObject {
     }
    
     open func extractInfo(url: URL) throws -> ([Format], Info) {
+        let pythonObject: PythonObject
+        if let _pythonObject = self.pythonObject {
+            pythonObject = _pythonObject
+        } else {
+            pythonObject = try makePythonObject()
+        }
+
         print(#function, url)
         let info = try pythonObject.extract_info.throwing.dynamicallyCall(withKeywordArguments: ["": url.absoluteString, "download": false, "process": true])
 //        print(#function, "throttled:", pythonObject.throttled)

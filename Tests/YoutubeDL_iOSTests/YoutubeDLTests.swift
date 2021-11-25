@@ -23,10 +23,17 @@
 import XCTest
 @testable import YoutubeDL
 import PythonKit
-
+import PythonSupport
+    
 final class YoutubeDL_iOSTests: XCTestCase {
+    func testPy_IsInitialized() {
+        XCTAssertEqual(Py_IsInitialized(), 0)
+        PythonSupport.initialize()
+        XCTAssertEqual(Py_IsInitialized(), 1)
+    }
+    
     func testExtractInfo() async throws {
-        let youtubeDL = try await YoutubeDL()
+        let youtubeDL = YoutubeDL()
         let (formats, info) = try youtubeDL.extractInfo(url: URL(string: "https://www.youtube.com/watch?v=WdFj7fUnmC0")!)
         print(formats, info)
         XCTAssertEqual(info.title, "YoutubeDL iOS app demo")
@@ -34,7 +41,7 @@ final class YoutubeDL_iOSTests: XCTestCase {
     }
 
     func testDownload() async throws {
-        let youtubeDL = try await YoutubeDL()
+        let youtubeDL = YoutubeDL()
         youtubeDL.downloader = Downloader(backgroundURLSessionIdentifier: nil)
         isTest = true
         let url = try await youtubeDL.download(url: URL(string: "https://www.youtube.com/watch?v=WdFj7fUnmC0")!)
@@ -42,7 +49,7 @@ final class YoutubeDL_iOSTests: XCTestCase {
     }
 
     func testDownloads() async throws {
-        let youtubeDL = try await YoutubeDL()
+        let youtubeDL = YoutubeDL()
         youtubeDL.downloader = Downloader(backgroundURLSessionIdentifier: nil)
         isTest = true
         var url = try await youtubeDL.download(url: URL(string: "https://www.youtube.com/watch?v=WdFj7fUnmC0")!)
@@ -52,7 +59,7 @@ final class YoutubeDL_iOSTests: XCTestCase {
     }
 
     func testError() async throws {
-        let youtubeDL = try await YoutubeDL()
+        let youtubeDL = YoutubeDL()
         do {
             _ = try youtubeDL.extractInfo(url: URL(string: "https://apple.com")!)
         } catch {
@@ -66,7 +73,7 @@ final class YoutubeDL_iOSTests: XCTestCase {
     }
 
     func testPythonDecoder() async throws {
-        let youtubeDL = try await YoutubeDL()
+        let youtubeDL = YoutubeDL()
         let (formats, info) = try youtubeDL.extractInfo(url: URL(string: "https://www.youtube.com/watch?v=WdFj7fUnmC0")!)
         print(formats, info)
     }

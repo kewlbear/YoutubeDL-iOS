@@ -55,7 +55,8 @@ open class Transcoder {
                     info[key] = String(components[1])
                     if key == "progress" {
 //                        print(#function, info)
-                        if let time = Int(info["out_time_us"] ?? ""), time >= 0 {
+                        if let time = Int(info["out_time_us"] ?? ""),
+                           time >= 0 { // FIXME: reset global variable(s) causing it
                             let progress = Double(time) / maxTime
                             print(#function, "progress:", progress
 //                                  , info["out_time_us"] ?? "nil", time
