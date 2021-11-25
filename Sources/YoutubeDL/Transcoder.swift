@@ -27,6 +27,10 @@ import FFmpegSupport
 
 public typealias TimeRange = Range<TimeInterval>
 
+public enum FFmpegError: Error {
+    case exit(code: Int)
+}
+
 open class Transcoder {
     var progressBlock: ((Double) -> Void)?
     
@@ -51,9 +55,11 @@ open class Transcoder {
                     info[key] = String(components[1])
                     if key == "progress" {
 //                        print(#function, info)
-                        if let time = Int(info["out_time_us"] ?? "") {
+                        if let time = Int(info["out_time_us"] ?? ""), time >= 0 {
                             let progress = Double(time) / maxTime
-                            print(#function, "progress:", progress)
+                            print(#function, "progress:", progress
+//                                  , info["out_time_us"] ?? "nil", time
+                            )
                             progressBlock?(progress)
                         }
                         guard info["progress"] != "end" else { break }
@@ -94,8 +100,14 @@ open class Transcoder {
             url.path,
         ]
         
-        let ret = ffmpeg(args)
-        print(#function, ret)
+        let code = ffmpeg(args)
+        print(#function, code)
+        
+        try pipe.fileHandleForWriting.close()
+        
+        guard code == 0 else {
+            throw FFmpegError.exit(code: code)
+        }
     }
 }
 

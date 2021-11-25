@@ -167,11 +167,11 @@ public class StopWatch {
     
     public init(name: String = #function) {
         self.name = name
-        report(item: #function)
+//        report(item: #function)
     }
     
     deinit {
-        report(item: #function)
+//        report(item: #function)
     }
     
     public func report(item: String? = nil) {

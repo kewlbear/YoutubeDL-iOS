@@ -90,8 +90,8 @@ public struct Format: Codable {
     public var tbr: Double
     public var url: String
     public var width: Int?
-    public var language: String
-    public var language_preference: Int
+    public var language: String?
+    public var language_preference: Int?
     public var ext: String
     public var vcodec: String
     public var acodec: String
@@ -531,72 +531,64 @@ open class YoutubeDL: NSObject {
                 notify(body: NSLocalizedString("AskTranscode", comment: "Notification body"), identifier: NotificationRequestIdentifier.transcode.rawValue)
                 return
             }
-
-//            let alert = UIAlertController(title: nil, message: NSLocalizedString("DoNotSwitch", comment: "Alert message"), preferredStyle: .alert)
-//            alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: "Action"), style: .default, handler: nil))
-//            self.topViewController?.present(alert, animated: true, completion: nil)
+            
+            //            let alert = UIAlertController(title: nil, message: NSLocalizedString("DoNotSwitch", comment: "Alert message"), preferredStyle: .alert)
+            //            alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: "Action"), style: .default, handler: nil))
+            //            self.topViewController?.present(alert, animated: true, completion: nil)
         }
-       
+        
         let url = makeURL(directory: directory, title: download.safeTitle, kind: .otherVideo, ext: "webm") // FIXME: ext
         let outURL = makeURL(directory: directory, title: download.safeTitle, kind: .videoOnly, ext: "mp4")
         
         removeItem(at: outURL)
-
+        
         DispatchQueue.main.async {
             let progress = self.downloader.progress
             progress.kind = nil
             progress.localizedDescription = NSLocalizedString("Transcoding...", comment: "Progress description")
             progress.totalUnitCount = 100
         }
-
+        
         let t0 = ProcessInfo.processInfo.systemUptime
-
+        
         if transcoder == nil {
             transcoder = Transcoder()
         }
-        var ret: Int32?
-
-        @Sendable func requestProgress() {
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-                self.transcoder?.progressBlock = { progress in
-                    self.transcoder?.progressBlock = nil
-
-                    let elapsed = ProcessInfo.processInfo.systemUptime - t0
-                    let speed = progress / elapsed
-                    let ETA = (1 - progress) / speed
-
-                    guard ETA.isFinite else { return }
-
-                    DispatchQueue.main.async {
-                        let _progress = self.downloader.progress
-                        _progress.completedUnitCount = Int64(progress * 100)
-                        _progress.estimatedTimeRemaining = ETA
-                    }
-                }
-
-                if self.transcoder != nil {
-                    requestProgress()
-                }
+        
+        transcoder?.progressBlock = { progress in
+            print(#function, "progress:", progress)
+            let elapsed = ProcessInfo.processInfo.systemUptime - t0
+            let speed = progress / elapsed
+            let ETA = (1 - progress) / speed
+            
+            guard ETA.isFinite else { return }
+            
+            DispatchQueue.main.async {
+                let _progress = self.downloader.progress
+                _progress.completedUnitCount = Int64(progress * 100)
+                _progress.estimatedTimeRemaining = ETA
             }
         }
-
-        requestProgress()
-
-        try? transcoder?.transcode(from: url, to: outURL, timeRange: download.timeRange, bitRate: download.bitRate)
-
-        transcoder = nil
-
-        print(#function, ret ?? "nil?", "took", downloader.dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
-
-//        guard ret == 0 else { return }
         
-        if !keepIntermediates {
-            removeItem(at: url)
+        do {
+            defer {
+                transcoder = nil
+            }
+            
+            try transcoder?.transcode(from: url, to: outURL, timeRange: download.timeRange, bitRate: download.bitRate)
+            
+            print(#function, "took", downloader.dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
+            
+            if !keepIntermediates {
+                removeItem(at: url)
+            }
+            
+            notify(body: NSLocalizedString("FinishedTranscoding", comment: "Notification body"))
+            
+            tryMerge(directory: url.deletingLastPathComponent(), title: url.title, timeRange: download.timeRange)
+        } catch {
+            print(#function, error)
         }
-        
-        notify(body: NSLocalizedString("FinishedTranscoding", comment: "Notification body"))
-
-        tryMerge(directory: url.deletingLastPathComponent(), title: url.title, timeRange: download.timeRange)
     }
     
     internal func export(_ url: URL) {

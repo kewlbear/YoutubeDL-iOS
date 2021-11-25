@@ -51,15 +51,15 @@ struct _KeyedDecodingContainer<Key: CodingKey>: KeyedDecodingContainerProtocol {
     }
     
     func decode(_ type: Bool.Type, forKey key: Key) throws -> Bool {
-        Bool(self[key])!
+        try value(key)
     }
     
     func decode(_ type: String.Type, forKey key: Key) throws -> String {
-        String(self[key])!
+        try value(key)
     }
     
     func decode(_ type: Double.Type, forKey key: Key) throws -> Double {
-        Double(self[key])!
+        try value(key)
     }
     
     func decode(_ type: Float.Type, forKey key: Key) throws -> Float {
@@ -67,7 +67,7 @@ struct _KeyedDecodingContainer<Key: CodingKey>: KeyedDecodingContainerProtocol {
     }
     
     func decode(_ type: Int.Type, forKey key: Key) throws -> Int {
-        Int(self[key])!
+        try value(key)
     }
     
     func decode(_ type: Int8.Type, forKey key: Key) throws -> Int8 {
@@ -126,8 +126,26 @@ struct _KeyedDecodingContainer<Key: CodingKey>: KeyedDecodingContainerProtocol {
         fatalError()
     }
     
-    subscript(key: Key) -> PythonObject {
-        dict[key.stringValue]!
+    func value<T: ConvertibleFromPython>(_ key: Key) throws -> T {
+        guard let value = T(try value(for: key)) else {
+            throw DecodingError.typeMismatch(
+                T.self,
+                DecodingError.Context(codingPath: codingPath,
+                                      debugDescription: "type mismatch",
+                                      underlyingError: nil))
+        }
+        return value
+    }
+    
+    func value(for key: Key) throws -> PythonObject {
+        guard let value = dict[key.stringValue] else {
+            throw DecodingError.keyNotFound(
+                key,
+                DecodingError.Context(codingPath: codingPath,
+                                      debugDescription: "invalid key",
+                                      underlyingError: nil))
+        }
+        return value
     }
 }
 
