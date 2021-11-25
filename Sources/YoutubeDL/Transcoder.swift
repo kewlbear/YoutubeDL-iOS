@@ -42,6 +42,7 @@ open class Transcoder {
                 } else {
                     maxTime = 1_000_000 // FIXME: probe?
                 }
+                print(#function, "await lines", pipe.fileHandleForReading)
                 for try await line in pipe.fileHandleForReading.bytes.lines {
                     //                    print(#function, line)
                     let components = line.split(separator: "=")
@@ -49,13 +50,17 @@ open class Transcoder {
                     let key = String(components[0])
                     info[key] = String(components[1])
                     if key == "progress" {
-                        print(#function, info)
+//                        print(#function, info)
                         if let time = Int(info["out_time_us"] ?? "") {
-                            progressBlock?(Double(time) / maxTime)
+                            let progress = Double(time) / maxTime
+                            print(#function, "progress:", progress)
+                            progressBlock?(progress)
                         }
+                        guard info["progress"] != "end" else { break }
                         info.removeAll()
                     }
                 }
+                print(#function, "no more lines?", pipe.fileHandleForReading)
             } else {
                 // Fallback on earlier versions
             }
@@ -64,6 +69,7 @@ open class Transcoder {
         var args = [
             "FFmpeg-iOS",
             "-progress", "pipe:\(pipe.fileHandleForWriting.fileDescriptor)",
+            "-nostats",
         ]
         
         if let timeRange = timeRange {

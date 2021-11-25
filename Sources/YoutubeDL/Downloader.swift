@@ -117,7 +117,7 @@ open class Downloader: NSObject {
 func removeItem(at url: URL) {
     do {
         try FileManager.default.removeItem(at: url)
-        print(#function, "removed", url.lastPathComponent)
+//        print(#function, "removed", url.lastPathComponent)
     }
     catch {
         let error = error as NSError
@@ -153,10 +153,30 @@ extension Downloader: URLSessionDelegate {
 @available(iOS 12.0, *)
 extension Downloader: URLSessionTaskDelegate {
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        print(#function, session, task, error ?? "no error")
-//        if let error = error {
-//            print(#function, session, task, error)
-//        }
+//        print(#function, session, task, error ?? "no error")
+        if let error = error {
+            print(#function, session, task, error)
+        }
+    }
+}
+
+public class StopWatch {
+    let t0 = Date()
+    
+    let name: String
+    
+    public init(name: String = #function) {
+        self.name = name
+        report(item: #function)
+    }
+    
+    deinit {
+        report(item: #function)
+    }
+    
+    public func report(item: String? = nil) {
+        let now = Date()
+        print(now, item ?? name, "took", now.timeIntervalSince(t0), "seconds")
     }
 }
 
@@ -164,6 +184,9 @@ extension Downloader: URLSessionTaskDelegate {
 extension Downloader: URLSessionDownloadDelegate {
    
     func assemble(to url: URL, size: UInt64, kind: Kind) -> UInt64 {
+        let stopWatch = StopWatch()
+        defer { stopWatch.report() }
+        
         let partURL = url.appendingPathExtension("part")
         FileManager.default.createFile(atPath: partURL.path, contents: nil, attributes: nil)
         
@@ -183,7 +206,7 @@ extension Downloader: URLSessionDownloadDelegate {
                 }
                 
                 file.write(data)
-                print(#function, "wrote \(data.count) bytes to \(partURL.lastPathComponent)")
+//                print(#function, "wrote \(data.count) bytes to \(partURL.lastPathComponent)")
                 
                 removeItem(at: part)
                 
@@ -235,14 +258,14 @@ extension Downloader: URLSessionDownloadDelegate {
             if range.isEmpty {
                 removeItem(at: url)
                 try FileManager.default.moveItem(at: location, to: url)
-                print(#function, "moved to", url)
+                print(#function, "moved to", url.path)
                 
                 streamContinuation?.yield((url, kind))
             } else {
                 let part = url.appendingPathExtension("part-\(range.lowerBound)")
                 removeItem(at: part)
                 try FileManager.default.moveItem(at: location, to: part)
-                print(#function, "moved to", part)
+//                print(#function, "moved to", part.path)
 
                 guard range.upperBound >= size else {
                     guard var request = downloadTask.originalRequest else {
@@ -251,7 +274,7 @@ extension Downloader: URLSessionDownloadDelegate {
                     }
                     let end = request.setRange(start: range.upperBound, fullSize: size)
                     let task = download(request: request, url: url)
-                    print(#function, "continue download to offset \(end)", task)
+//                    print(#function, "continue download to offset \(end)", task)
                     return
                 }
                 
