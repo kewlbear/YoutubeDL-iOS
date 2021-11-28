@@ -142,7 +142,7 @@ public extension Format {
     var isVideoOnly: Bool { acodec == "none" }
 }
 
-public let defaultOptions: [String: Any] = [
+public let defaultOptions: PythonObject = [
     "format": "bestvideo,bestaudio[ext=m4a]",
     "nocheckcertificate": true,
     "verbose": true,
@@ -176,6 +176,7 @@ open class YoutubeDL: NSObject {
         var options: Options
         var timeRange: TimeRange?
         var bitRate: Double?
+        var transcodePending: Bool
     }
     
     public static var shouldDownloadPythonModule: Bool {
@@ -224,7 +225,7 @@ open class YoutubeDL: NSObject {
     
     internal var pythonObject: PythonObject?
 
-    internal var options: [String: Any]
+    internal var options: PythonObject?
     
     lazy var finished: AsyncStream<URL> = {
         AsyncStream { continuation in
@@ -239,9 +240,6 @@ open class YoutubeDL: NSObject {
     lazy var postDownloadTask = Task {
         for await (url, kind) in downloader.stream {
             print(#function, kind, url.lastPathComponent)
-            
-            downloader.isDownloading = false
-            processPendingDownload()
             
             switch kind {
             case .complete:
@@ -264,11 +262,17 @@ open class YoutubeDL: NSObject {
     
     var pendingDownloadsURL: URL { downloadsDirectory.appendingPathComponent("PendingDownloads.json") }
     
-    public init(options: [String: Any]? = defaultOptions) {
-        self.options = options
+    public var pendingTranscode: URL? {
+        pendingDownloads.first { $0.transcodePending }?.directory
     }
     
-    func makePythonObject(options: PythonObject = defaultOptions) throws -> PythonObject {
+    public override init() {
+        super.init()
+        
+        _ = postDownloadTask
+    }
+    
+    func makePythonObject(options: PythonObject) throws -> PythonObject {
         guard FileManager.default.fileExists(atPath: Self.pythonModuleURL.path) else {
             throw YoutubeDLError.noPythonModule
         }
@@ -331,7 +335,7 @@ open class YoutubeDL: NSObject {
     public typealias FormatSelector = (Info) async -> ([Format], URL?, TimeRange?, Double?)
     
     open func download(url: URL, options: Options = [.background, .chunked], formatSelector: FormatSelector? = nil) async throws -> URL {
-        var (formats, info) = try extractInfo(url: url)
+        var (formats, info) = try await extractInfo(url: url)
         
         var directory: URL?
         var timeRange: Range<TimeInterval>?
@@ -343,17 +347,18 @@ open class YoutubeDL: NSObject {
             bitRate = formats[0].vbr
         }
         
-        pendingDownloads.append(Download(formats: formats,
+        pendingDownloads.append(Download(formats: [],
                                          directory: directory ?? downloadsDirectory,
                                          safeTitle: info.safeTitle,
                                          options: options,
                                          timeRange: timeRange,
-                                         bitRate: bitRate))
+                                         bitRate: bitRate,
+                                         transcodePending: false))
         
-        _ = postDownloadTask
+        await downloader.session.allTasks.forEach { $0.cancel() }
         
-        if !downloader.isDownloading {
-            processPendingDownload()
+        for format in formats {
+            try download(format: format, resume: !downloader.isDownloading, chunked: options.contains(.chunked), directory: directory ?? downloadsDirectory, title: info.safeTitle)
         }
         
         for await url in finished {
@@ -390,7 +395,7 @@ open class YoutubeDL: NSObject {
         
         Task {
             let download = pendingDownloads[index]
-            try await self.download(format: format, chunked: download.options.contains(.chunked), directory: download.directory, title: download.safeTitle)
+            try self.download(format: format, resume: true, chunked: download.options.contains(.chunked), directory: download.directory, title: download.safeTitle)
         }
     }
     
@@ -402,12 +407,12 @@ open class YoutubeDL: NSObject {
             .appendingPathExtension(ext)
     }
     
-    open func download(format: Format, chunked: Bool, directory: URL, title: String) async throws {
+    open func download(format: Format, resume: Bool, chunked: Bool, directory: URL, title: String) throws {
         let kind: Kind = format.isVideoOnly
         ? (!format.isTranscodingNeeded ? .videoOnly : .otherVideo)
         : (format.isAudioOnly ? .audioOnly : .complete)
         
-        func download(for request: URLRequest) async throws {
+        func download(for request: URLRequest, resume: Bool) throws {
             let progress: Progress? = downloader.progress
             progress?.kind = .file
             progress?.fileOperationKind = .downloading
@@ -422,37 +427,41 @@ open class YoutubeDL: NSObject {
             
             removeItem(at: url)
 
-            let task = downloader.download(request: request, url: url)
+            let task = downloader.download(request: request, url: url, resume: resume)
             print(#function, "start download:", task.info)
         }
         
         if chunked, let size = format.filesize {
             guard var request = format.urlRequest else { fatalError() }
-            // https://github.com/ytdl-org/youtube-dl/issues/15271#issuecomment-362834889
-            let end = request.setRange(start: 0, fullSize: Int64(size))
-            print(#function, "first chunked size:", end)
-            
-            return try await download(for: request)
+            var start: Int64 = 0
+            while start < size {
+                // https://github.com/ytdl-org/youtube-dl/issues/15271#issuecomment-362834889
+                let end = request.setRange(start: start, fullSize: Int64(size))
+//                print(#function, "first chunked size:", end + 1)
+                
+                try download(for: request, resume: resume && start == 0)
+                start = end + 1
+            }
         } else {
             guard let request = format.urlRequest else { fatalError() }
             
-            return try await download(for: request)
+            try download(for: request, resume: resume)
         }
     }
    
-    open func extractInfo(url: URL) throws -> ([Format], Info) {
+    open func extractInfo(url: URL) async throws -> ([Format], Info) {
         let pythonObject: PythonObject
         if let _pythonObject = self.pythonObject {
             pythonObject = _pythonObject
         } else {
-            pythonObject = try makePythonObject()
+            pythonObject = try await makePythonObject()
         }
 
         print(#function, url)
         let info = try pythonObject.extract_info.throwing.dynamicallyCall(withKeywordArguments: ["": url.absoluteString, "download": false, "process": true])
 //        print(#function, "throttled:", pythonObject.throttled)
         
-        let format_selector = pythonObject.build_format_selector(options["format"])
+        let format_selector = pythonObject.build_format_selector(options!["format"])
         let formats_to_download = format_selector(info)
         var formats: [Format] = []
         let decoder = PythonDecoder()
@@ -505,7 +514,7 @@ open class YoutubeDL: NSObject {
             print(#function, "unable to init export session")
             return
         }
-        let outputURL = downloadsDirectory.appendingPathComponent(title).appendingPathExtension("mp4")
+        let outputURL = directory.appendingPathComponent(title).appendingPathExtension("mp4")
         
         removeItem(at: outputURL)
         
@@ -547,6 +556,9 @@ open class YoutubeDL: NSObject {
         
         DispatchQueue.main.async {
             guard UIApplication.shared.applicationState == .active else {
+                guard let index = self.pendingDownloads.firstIndex(where: { $0.directory.path == directory.path }) else { fatalError() }
+                self.pendingDownloads[index].transcodePending = true
+                
                 notify(body: NSLocalizedString("AskTranscode", comment: "Notification body"), identifier: NotificationRequestIdentifier.transcode.rawValue)
                 return
             }
@@ -676,6 +688,7 @@ open class YoutubeDL: NSObject {
     }
     
     public static func downloadPythonModule(from url: URL = latestDownloadURL) async throws {
+        let stopWatch = StopWatch(); defer { stopWatch.report() }
         if #available(iOS 15.0, *) {
             let (location, _) = try await URLSession.shared.download(from: url)
             try movePythonModule(location)

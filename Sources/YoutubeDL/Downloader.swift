@@ -55,6 +55,8 @@ open class Downloader: NSObject {
     
     var t = ProcessInfo.processInfo.systemUptime
     
+    var bytesWritten: Int64 = 0
+    
     open var t0 = ProcessInfo.processInfo.systemUptime
    
     open var progress = Progress()
@@ -101,15 +103,17 @@ open class Downloader: NSObject {
         print(session, "created")
     }
 
-    open func download(request: URLRequest, url: URL) -> URLSessionDownloadTask {
+    open func download(request: URLRequest, url: URL, resume: Bool) -> URLSessionDownloadTask {
         currentRequest = request
         
         let task = session.downloadTask(with: request)
-        task.taskDescription = url.path
-        task.priority = URLSessionTask.highPriority
+        task.taskDescription = url.relativePath
+//        task.priority = URLSessionTask.highPriority
         
-        isDownloading = true
-        task.resume()
+        if resume {
+            isDownloading = true
+            task.resume()
+        }
         return task
     }
 }
@@ -167,7 +171,7 @@ public class StopWatch {
     
     public init(name: String = #function) {
         self.name = name
-//        report(item: #function)
+        report(item: #function)
     }
     
     deinit {
@@ -197,24 +201,26 @@ extension Downloader: URLSessionDownloadDelegate {
             
             repeat {
                 let part = url.appendingPathExtension("part-\(offset)")
-                let data = try Data(contentsOf: part, options: .alwaysMapped)
-                
-                if #available(iOS 13.0, *) {
-                    try file.seek(toOffset: offset)
-                } else {
-                    file.seek(toFileOffset: offset)
+                try autoreleasepool {
+                    let data = try Data(contentsOf: part, options: .alwaysMapped)
+                    
+                    if #available(iOS 13.0, *) {
+                        try file.seek(toOffset: offset)
+                    } else {
+                        file.seek(toFileOffset: offset)
+                    }
+                    
+                    file.write(data)
+                    offset += UInt64(data.count)
                 }
-                
-                file.write(data)
 //                print(#function, "wrote \(data.count) bytes to \(partURL.lastPathComponent)")
                 
                 removeItem(at: part)
                 
-                offset += UInt64(data.count)
             } while offset < size - 1
         }
         catch {
-            print(#function, error.localizedDescription)
+            print(#function, error)
         }
         
         removeItem(at: url)
@@ -251,31 +257,55 @@ extension Downloader: URLSessionDownloadDelegate {
         
         let kind = downloadTask.kind
         let url = downloadTask.taskDescription.map {
-            URL(fileURLWithPath: $0)
+            URL(fileURLWithPath: $0, relativeTo: directory)
         } ?? directory.appendingPathComponent("complete.mp4")
 
         do {
+            func resume(selector: @escaping ([URLSessionDownloadTask]) -> URLSessionDownloadTask?) {
+                Task {
+                    guard let task = selector(await session.tasks.2.filter { $0.state == .suspended }) else {
+                        print(#function, "no more task")
+                        return
+                    }
+                    print(#function, task.kind, task.originalRequest?.value(forHTTPHeaderField: "Range") ?? "no range", task.taskDescription ?? "no task description")
+                    task.resume()
+                }
+            }
+            
             if range.isEmpty {
+                notify(body: "finished \(url.lastPathComponent)")
                 removeItem(at: url)
                 try FileManager.default.moveItem(at: location, to: url)
                 print(#function, "moved to", url.path)
                 
+                resume { tasks in
+                    tasks.first { $0.hasPrefix(0) }
+                    ?? tasks.first
+                }
+                
                 streamContinuation?.yield((url, kind))
             } else {
+                notify(body: "\(range.upperBound * 100 / size)% \(url.lastPathComponent)")
                 let part = url.appendingPathExtension("part-\(range.lowerBound)")
                 removeItem(at: part)
                 try FileManager.default.moveItem(at: location, to: part)
 //                print(#function, "moved to", part.path)
 
                 guard range.upperBound >= size else {
-                    guard var request = downloadTask.originalRequest else {
-                        print(#function, "no original request")
-                        return
+                    resume { tasks in
+                        tasks.first {
+                            $0.taskDescription == downloadTask.taskDescription
+                            && $0.hasPrefix(range.upperBound)
+                        }
+                        ?? tasks.first { $0.hasPrefix(0) }
+                        ?? tasks.first
                     }
-                    let end = request.setRange(start: range.upperBound, fullSize: size)
-                    let task = download(request: request, url: url)
-//                    print(#function, "continue download to offset \(end)", task)
                     return
+                }
+                
+                resume { tasks in
+                    tasks.first { $0.hasPrefix(0) }
+                    ?? tasks.first
                 }
                 
                 _ = assemble(to: url, size: UInt64(size), kind: kind)
@@ -297,20 +327,19 @@ extension Downloader: URLSessionDownloadDelegate {
         guard t - self.t > 0.9 else {
             return
         }
+        
+        let elapsed = t - self.t
         self.t = t
-        
-        let elapsed = t - t0
         let (_, range, size) = (downloadTask.response as? HTTPURLResponse)?.contentRange ?? (nil, 0..<0, totalBytesExpectedToWrite)
-        let count = range.lowerBound + totalBytesWritten
+        let count = range.lowerBound + totalBytesWritten - self.bytesWritten
+        self.bytesWritten = range.lowerBound + totalBytesWritten
         let bytesPerSec = Double(count) / elapsed
-        let remain = Double(size - count) / bytesPerSec
-        
-        let percent = percentFormatter.string(from: NSNumber(value: Double(count) / Double(size)))
+        let remain = Double(size - self.bytesWritten) / bytesPerSec
         
         DispatchQueue.main.async {
             let progress = self.progress
             progress.totalUnitCount = size
-            progress.completedUnitCount = count
+            progress.completedUnitCount = self.bytesWritten
             progress.throughput = Int(bytesPerSec)
             progress.estimatedTimeRemaining = remain
         }
@@ -325,6 +354,11 @@ extension URLSessionDownloadTask {
                 .last ?? "")
         ?? .complete
     }
+    
+    func hasPrefix(_ start: Int64) -> Bool {
+        (originalRequest?.value(forHTTPHeaderField: "Range") ?? "")
+            .hasPrefix("bytes=\(start)-")
+    }
 }
 
 var isTest = false
@@ -334,11 +368,12 @@ var isTest = false
 public func notify(body: String, identifier: String = "Download") {
     guard !isTest else { return }
     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound, .providesAppNotificationSettings]) { (granted, error) in
-        print(#function, "granted =", granted, error ?? "no error")
         guard granted else {
+            print(#function, "granted =", granted, error ?? "no error")
             return
         }
         
+        print(#function, body)
         let content = UNMutableNotificationContent()
         content.body = body
         let notificationRequest = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
