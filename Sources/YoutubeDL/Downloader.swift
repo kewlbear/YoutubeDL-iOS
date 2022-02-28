@@ -271,7 +271,15 @@ open class Downloader: NSObject {
 
         requestProgress()
 
-        ret = transcoder?.transcode(from: Kind.otherVideo.url, to: Kind.videoOnly.url)
+        if #available(iOS 13.0, *) {
+            do {
+                try transcoder?.transcode(from: Kind.otherVideo.url, to: Kind.videoOnly.url, timeRange: nil, bitRate: nil)
+            } catch {
+                print(error)
+            }
+        } else {
+            // Fallback on earlier versions
+        }
 
         transcoder = nil
 
@@ -388,7 +396,7 @@ extension Downloader: URLSessionDownloadDelegate {
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         let (_, range, size) = (downloadTask.response as? HTTPURLResponse)?.contentRange
             ?? (nil, -1 ..< -1, -1)
-//        print(#function, session, location)
+        print(#function, session, location)
         
         let kind = Kind(rawValue: downloadTask.taskDescription ?? "") ?? .complete
 
