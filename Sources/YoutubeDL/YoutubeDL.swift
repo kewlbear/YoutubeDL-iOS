@@ -245,11 +245,20 @@ open class YoutubeDL: NSObject {
             case .complete:
                 export(url)
             case .videoOnly, .audioOnly:
-                await transcode(directory: url.deletingLastPathComponent())
+                let directory = url.deletingLastPathComponent()
+                guard let download = pendingDownloads.first(where: { $0.directory.path == directory.path }) else {
+                    print(#function, "no download with", directory, pendingDownloads.map(\.directory))
+                    return
+                }
+                guard tryMerge(directory: directory, title: url.title, timeRange: download.timeRange) else { return }
                 finishedContinuation?.yield(url)
             case .otherVideo:
-//                await transcode(url: url)
-                break
+                do {
+                    try await transcode(directory: url.deletingLastPathComponent())
+                    finishedContinuation?.yield(url)
+                } catch {
+                    print(error)
+                }
             }
         }
     }
@@ -358,7 +367,7 @@ open class YoutubeDL: NSObject {
         await downloader.session.allTasks.forEach { $0.cancel() }
         
         for format in formats {
-            try download(format: format, resume: !downloader.isDownloading, chunked: options.contains(.chunked), directory: directory ?? downloadsDirectory, title: info.safeTitle)
+            try download(format: format, resume: !downloader.isDownloading || isTest, chunked: options.contains(.chunked), directory: directory ?? downloadsDirectory, title: info.safeTitle)
         }
         
         for await url in finished {
@@ -428,6 +437,11 @@ open class YoutubeDL: NSObject {
             removeItem(at: url)
 
             let task = downloader.download(request: request, url: url, resume: resume)
+            
+            if task.hasPrefix(0) {
+                guard FileManager.default.createFile(atPath: url.appendingPathExtension("part").path, contents: nil) else { fatalError() }
+            }
+            
             print(#function, "start download:", task.info)
         }
         
@@ -473,7 +487,7 @@ open class YoutubeDL: NSObject {
         return (formats, try decoder.decode(Info.self, from: info))
     }
     
-    func tryMerge(directory: URL, title: String, timeRange: TimeRange?) {
+    func tryMerge(directory: URL, title: String, timeRange: TimeRange?) -> Bool {
         let t0 = ProcessInfo.processInfo.systemUptime
        
         let videoURL = makeURL(directory: directory, title: title, kind: .videoOnly, ext: "mp4")
@@ -486,7 +500,7 @@ open class YoutubeDL: NSObject {
             print(#function,
                   videoAsset.tracks(withMediaType: .video),
                   audioAsset.tracks(withMediaType: .audio))
-            return
+            return false
         }
         
         let composition = AVMutableComposition()
@@ -507,12 +521,12 @@ open class YoutubeDL: NSObject {
         }
         catch {
             print(#function, error)
-            return
+            return false
         }
         
         guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else {
             print(#function, "unable to init export session")
-            return
+            return false
         }
         let outputURL = directory.appendingPathComponent(title).appendingPathExtension("mp4")
         
@@ -546,9 +560,10 @@ open class YoutubeDL: NSObject {
                 print(#function, session.error ?? "no error?")
             }
         }
+        return true
     }
     
-    open func transcode(directory: URL) async {
+    open func transcode(directory: URL) async throws {
         guard let download = pendingDownloads.first(where: { $0.directory.path == directory.path }) else {
             print(#function, "no download with", directory, pendingDownloads.map(\.directory))
             return
@@ -601,25 +616,21 @@ open class YoutubeDL: NSObject {
             }
         }
         
-        do {
-            defer {
-                transcoder = nil
-            }
-            
-            try transcoder?.transcode(from: url, to: outURL, timeRange: download.timeRange, bitRate: download.bitRate)
-            
-            print(#function, "took", downloader.dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
-            
-            if !keepIntermediates {
-                removeItem(at: url)
-            }
-            
-            notify(body: NSLocalizedString("FinishedTranscoding", comment: "Notification body"))
-            
-            tryMerge(directory: url.deletingLastPathComponent(), title: url.title, timeRange: download.timeRange)
-        } catch {
-            print(#function, error)
+        defer {
+            transcoder = nil
         }
+        
+        try transcoder?.transcode(from: url, to: outURL, timeRange: download.timeRange, bitRate: download.bitRate)
+        
+        print(#function, "took", downloader.dateComponentsFormatter.string(from: ProcessInfo.processInfo.systemUptime - t0) ?? "?")
+        
+        if !keepIntermediates {
+            removeItem(at: url)
+        }
+        
+        notify(body: NSLocalizedString("FinishedTranscoding", comment: "Notification body"))
+        
+        tryMerge(directory: url.deletingLastPathComponent(), title: url.title, timeRange: download.timeRange)
     }
     
     internal func export(_ url: URL) {

@@ -187,57 +187,6 @@ public class StopWatch {
 @available(iOS 12.0, *)
 extension Downloader: URLSessionDownloadDelegate {
    
-    func assemble(to url: URL, size: UInt64, kind: Kind) -> UInt64 {
-        let stopWatch = StopWatch()
-        defer { stopWatch.report() }
-        
-        let partURL = url.appendingPathExtension("part")
-        FileManager.default.createFile(atPath: partURL.path, contents: nil, attributes: nil)
-        
-        var offset: UInt64 = 0
-        
-        do {
-            let file = try FileHandle(forWritingTo: partURL)
-            
-            repeat {
-                let part = url.appendingPathExtension("part-\(offset)")
-                try autoreleasepool {
-                    let data = try Data(contentsOf: part, options: .alwaysMapped)
-                    
-                    if #available(iOS 13.0, *) {
-                        try file.seek(toOffset: offset)
-                    } else {
-                        file.seek(toFileOffset: offset)
-                    }
-                    
-                    file.write(data)
-                    offset += UInt64(data.count)
-                }
-//                print(#function, "wrote \(data.count) bytes to \(partURL.lastPathComponent)")
-                
-                removeItem(at: part)
-                
-            } while offset < size - 1
-        }
-        catch {
-            print(#function, error)
-        }
-        
-        removeItem(at: url)
-        
-        do {
-            try FileManager.default.moveItem(at: partURL, to: url)
-            
-            let result = streamContinuation?.yield((url, kind))
-            guard case .enqueued(remaining: _) = result else { fatalError() }
-        }
-        catch {
-            print(#function, error)
-        }
-        
-        return offset
-    }
-    
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let taskDescription = downloadTask.taskDescription else {
             print(#function, "no task description", downloadTask)
@@ -263,8 +212,9 @@ extension Downloader: URLSessionDownloadDelegate {
         do {
             func resume(selector: @escaping ([URLSessionDownloadTask]) -> URLSessionDownloadTask?) {
                 Task {
-                    guard let task = selector(await session.tasks.2.filter { $0.state == .suspended }) else {
-                        print(#function, "no more task")
+                    let tasks = await session.tasks.2
+                    guard let task = selector(tasks.filter { $0.state == .suspended }) else {
+                        print(#function, "no more task", tasks.map(\.state.rawValue))
                         return
                     }
                     print(#function, task.kind, task.originalRequest?.value(forHTTPHeaderField: "Range") ?? "no range", task.taskDescription ?? "no task description")
@@ -285,12 +235,18 @@ extension Downloader: URLSessionDownloadDelegate {
                 
                 streamContinuation?.yield((url, kind))
             } else {
-                notify(body: "\(range.upperBound * 100 / size)% \(url.lastPathComponent)")
-                let part = url.appendingPathExtension("part-\(range.lowerBound)")
-                removeItem(at: part)
-                try FileManager.default.moveItem(at: location, to: part)
-//                print(#function, "moved to", part.path)
-
+                //                notify(body: "\(range.upperBound * 100 / size)% \(url.lastPathComponent)")
+                let part = url.appendingPathExtension("part")
+                let file = try FileHandle(forWritingTo: part)
+                
+                try file.seek(toOffset: UInt64(range.lowerBound))
+                
+                let data = try Data(contentsOf: location, options: .alwaysMapped)
+                
+                file.write(data)
+                
+                try file.close()
+                
                 guard range.upperBound >= size else {
                     resume { tasks in
                         tasks.first {
@@ -308,7 +264,10 @@ extension Downloader: URLSessionDownloadDelegate {
                     ?? tasks.first
                 }
                 
-                _ = assemble(to: url, size: UInt64(size), kind: kind)
+                try FileManager.default.moveItem(at: part, to: url)
+                
+                let result = streamContinuation?.yield((url, kind))
+                guard case .enqueued(remaining: _) = result else { fatalError() }
             }
             
             DispatchQueue.main.async {
