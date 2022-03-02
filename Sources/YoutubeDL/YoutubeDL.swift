@@ -49,7 +49,7 @@ public struct Info: Codable {
     public var channel_url: String
     public var duration: Int
     public var view_count: Int
-    public var average_rating: Double
+    public var average_rating: Double?
     public var age_limit: Int
     public var webpage_url: String
     public var categories: [String]
@@ -95,8 +95,8 @@ public struct Format: Codable {
     public var format_note: String
     public var fps: Int?
     public var height: Int?
-    public var quality: Int
-    public var tbr: Double
+    public var quality: Int?
+    public var tbr: Double?
     public var url: String
     public var width: Int?
     public var language: String?
