@@ -47,7 +47,7 @@ public struct Info: Codable {
     public var uploader_url: String?
     public var channel_id: String?
     public var channel_url: String?
-    public var duration: Int
+    public var duration: TimeInterval?
     public var view_count: Int?
     public var average_rating: Double?
     public var age_limit: Int?
@@ -85,14 +85,17 @@ public struct Info: Codable {
 }
 
 public extension Info {
-    var safeTitle: String { title.replacingOccurrences(of: "/", with: "_") }
+    var safeTitle: String {
+        String(title[..<(title.index(title.startIndex, offsetBy: 100, limitedBy: title.endIndex) ?? title.endIndex)])
+            .replacingOccurrences(of: "/", with: "_")
+    }
 }
 
 public struct Format: Codable {
     public var asr: Int?
     public var filesize: Int?
     public var format_id: String
-    public var format_note: String
+    public var format_note: String?
     public var fps: Int?
     public var height: Int?
     public var quality: Int?
@@ -102,8 +105,8 @@ public struct Format: Codable {
     public var language: String?
     public var language_preference: Int?
     public var ext: String
-    public var vcodec: String
-    public var acodec: String
+    public var vcodec: String?
+    public var acodec: String?
     public var dynamic_range: String?
     public var abr: Double?
     public var vbr: Double?
@@ -118,7 +121,7 @@ public struct Format: Codable {
     public var audio_ext: String
     public var video_ext: String
     public var format: String
-    public var resolution: String
+    public var resolution: String?
     public var http_headers: [String: String]
 }
 
@@ -143,7 +146,8 @@ public extension Format {
 }
 
 public let defaultOptions: PythonObject = [
-    "format": "bestvideo,bestaudio[ext=m4a]",
+//    "format": "bestvideo,bestaudio[ext=m4a]",
+    "format": "best",
     "nocheckcertificate": true,
     "verbose": true,
 ]
@@ -473,6 +477,7 @@ open class YoutubeDL: NSObject {
 
         print(#function, url)
         let info = try pythonObject.extract_info.throwing.dynamicallyCall(withKeywordArguments: ["": url.absoluteString, "download": false, "process": true])
+        print(info)
 //        print(#function, "throttled:", pythonObject.throttled)
         
         let format_selector = pythonObject.build_format_selector(options!["format"])

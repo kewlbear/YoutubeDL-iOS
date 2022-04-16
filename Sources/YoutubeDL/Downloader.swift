@@ -306,7 +306,7 @@ extension Downloader: URLSessionDownloadDelegate {
 }
 
 extension URLSessionDownloadTask {
-    var kind: Kind {
+    public var kind: Kind {
         Kind(rawValue: URL(fileURLWithPath: taskDescription ?? "")
                 .deletingPathExtension()
                 .path.components(separatedBy: Kind.separator)
