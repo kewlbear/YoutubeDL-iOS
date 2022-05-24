@@ -86,7 +86,7 @@ public struct Info: Codable {
 
 public extension Info {
     var safeTitle: String {
-        String(title[..<(title.index(title.startIndex, offsetBy: 100, limitedBy: title.endIndex) ?? title.endIndex)])
+        String(title[..<(title.index(title.startIndex, offsetBy: 40, limitedBy: title.endIndex) ?? title.endIndex)])
             .replacingOccurrences(of: "/", with: "_")
     }
 }
@@ -345,6 +345,8 @@ open class YoutubeDL: NSObject {
     public typealias FormatSelector = (Info) async -> ([Format], URL?, TimeRange?, Double?, String)
     
     open func download(url: URL, options: Options = [.background, .chunked], formatSelector: FormatSelector? = nil) async throws -> URL {
+        downloader.progress = Progress()
+        
         var (formats, info) = try await extractInfo(url: url)
         
         var directory: URL?
