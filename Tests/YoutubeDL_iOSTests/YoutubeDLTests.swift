@@ -78,6 +78,20 @@ final class YoutubeDL_iOSTests: XCTestCase {
         print(formats, info)
     }
     
+    func testDirect() async throws {
+        print(FileManager.default.currentDirectoryPath)
+        try await yt_dlp(argv: [
+            "-F",
+//            "-f", "bestvideo+bestaudio[ext=m4a]/best",
+            "https://m.youtube.com/watch?v=ezEYcU9Pp_w",
+            "--no-check-certificates",
+        ], progress: { dict in
+            print(#function, dict["status"] ?? "no status?", dict["filename"] ?? "no filename?", dict["elapsed"] ?? "no elapsed", dict.keys)
+        }, log: { level, message in
+            print(#function, level, message)
+        })
+    }
+    
     static var allTests = [
         ("testExtractInfo", testExtractInfo),
     ]

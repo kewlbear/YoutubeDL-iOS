@@ -40,48 +40,48 @@ public struct Info: Codable {
     public var id: String
     public var title: String
     public var formats: [Format]
-    public var description: String
-    public var upload_date: String
-    public var uploader: String
-    public var uploader_id: String
-    public var uploader_url: String
-    public var channel_id: String
-    public var channel_url: String
+    public var description: String?
+    public var upload_date: String?
+    public var uploader: String?
+    public var uploader_id: String?
+    public var uploader_url: String?
+    public var channel_id: String?
+    public var channel_url: String?
     public var duration: Int
-    public var view_count: Int
+    public var view_count: Int?
     public var average_rating: Double?
-    public var age_limit: Int
-    public var webpage_url: String
-    public var categories: [String]
-    public var tags: [String]
-    public var playable_in_embed: Bool
-    public var is_live: Bool
-    public var was_live: Bool
-    public var live_status: String
+    public var age_limit: Int?
+    public var webpage_url: String?
+    public var categories: [String]?
+    public var tags: [String]?
+    public var playable_in_embed: Bool?
+    public var is_live: Bool?
+    public var was_live: Bool?
+    public var live_status: String?
     public var release_timestamp: Int?
     
     public struct Chapter: Codable {
-        public var title: String
-        public var start_time: TimeInterval
-        public var end_time: TimeInterval
+        public var title: String?
+        public var start_time: TimeInterval?
+        public var end_time: TimeInterval?
     }
     
     public var chapters: [Chapter]?
-    public var like_count: Int
-    public var channel: String
-    public var availability: String
+    public var like_count: Int?
+    public var channel: String?
+    public var availability: String?
     public var __post_extractor: String?
-    public var original_url: String
+    public var original_url: String?
     public var webpage_url_basename: String
-    public var extractor: String
-    public var extractor_key: String
+    public var extractor: String?
+    public var extractor_key: String?
     public var playlist: [String]?
     public var playlist_index: Int?
-    public var thumbnail: String
-    public var display_id: String
-    public var duration_string: String
+    public var thumbnail: String?
+    public var display_id: String?
+    public var duration_string: String?
     public var requested_subtitles: [String]?
-    public var __has_drm: Bool
+    public var __has_drm: Bool?
 }
 
 public extension Info {
@@ -281,52 +281,7 @@ open class YoutubeDL: NSObject {
         _ = postDownloadTask
     }
     
-    func makePythonObject(options: PythonObject) throws -> PythonObject {
-        guard FileManager.default.fileExists(atPath: Self.pythonModuleURL.path) else {
-            throw YoutubeDLError.noPythonModule
-        }
-        
-        let sys = try Python.attemptImport("sys")
-        if !(Array(sys.path) ?? []).contains(Self.pythonModuleURL.path) {
-            runSimpleString("""
-                class Pop:
-                    def __init__(self, args, bufsize=-1, executable=None,
-                                 stdin=None, stdout=None, stderr=None,
-                                 preexec_fn=None, close_fds=True,
-                                 shell=False, cwd=None, env=None, universal_newlines=None,
-                                 startupinfo=None, creationflags=0,
-                                 restore_signals=True, start_new_session=False,
-                                 pass_fds=(), *, user=None, group=None, extra_groups=None,
-                                 encoding=None, errors=None, text=None, umask=-1, pipesize=-1):
-                        raise OSError("Popen is not supported")
-                
-                    def communicate(self, input=None, timeout=None):
-                        pass
-                
-                    def kill(self):
-                        pass
-
-                    def wait(self):
-                        pass
-
-                import subprocess
-                subprocess.Popen = Pop
-                """)
-            
-            sys.path.insert(1, Self.pythonModuleURL.path)
-        }
-        
-        let pythonModule = try Python.attemptImport("yt_dlp")
-        pythonObject = pythonModule.YoutubeDL(options)
-        
-        self.options = options
-        
-        version = String(pythonModule.version.__version__)
-        
-        return pythonObject!
-    }
-    
-    func makePythonObject(_ options: PythonObject? = nil, initializePython: Bool = true, downloadPythonModule: Bool = true) async throws -> PythonObject {
+    func loadPythonModule(downloadPythonModule: Bool = true) async throws -> PythonObject {
         if Py_IsInitialized() == 0 {
             PythonSupport.initialize()
         }
@@ -338,10 +293,53 @@ open class YoutubeDL: NSObject {
             try await Self.downloadPythonModule()
         }
         
-        return try makePythonObject(options: options ?? defaultOptions)
+        let sys = try Python.attemptImport("sys")
+        if !(Array(sys.path) ?? []).contains(Self.pythonModuleURL.path) {
+            injectFakePopen()
+            
+            sys.path.insert(1, Self.pythonModuleURL.path)
+        }
+        
+        let pythonModule = try Python.attemptImport("yt_dlp")
+        version = String(pythonModule.version.__version__)
+        return pythonModule
+    }
+    
+    func injectFakePopen() {
+        runSimpleString("""
+            class Pop:
+                def __init__(self, args, bufsize=-1, executable=None,
+                             stdin=None, stdout=None, stderr=None,
+                             preexec_fn=None, close_fds=True,
+                             shell=False, cwd=None, env=None, universal_newlines=None,
+                             startupinfo=None, creationflags=0,
+                             restore_signals=True, start_new_session=False,
+                             pass_fds=(), *, user=None, group=None, extra_groups=None,
+                             encoding=None, errors=None, text=None, umask=-1, pipesize=-1):
+                    raise OSError("Popen is not supported")
+            
+                def communicate(self, input=None, timeout=None):
+                    pass
+            
+                def kill(self):
+                    pass
+
+                def wait(self):
+                    pass
+
+            import subprocess
+            subprocess.Popen = Pop
+            """)
+    }
+    
+    func makePythonObject(_ options: PythonObject? = nil, initializePython: Bool = true) async throws -> PythonObject {
+        let pythonModule = try await loadPythonModule()
+        pythonObject = pythonModule.YoutubeDL(options ?? defaultOptions)
+        self.options = options
+        return pythonObject!
     }
         
-    public typealias FormatSelector = (Info) async -> ([Format], URL?, TimeRange?, Double?)
+    public typealias FormatSelector = (Info) async -> ([Format], URL?, TimeRange?, Double?, String)
     
     open func download(url: URL, options: Options = [.background, .chunked], formatSelector: FormatSelector? = nil) async throws -> URL {
         var (formats, info) = try await extractInfo(url: url)
@@ -349,16 +347,18 @@ open class YoutubeDL: NSObject {
         var directory: URL?
         var timeRange: Range<TimeInterval>?
         let bitRate: Double?
+        let title: String
         if let formatSelector = formatSelector {
-            (formats, directory, timeRange, bitRate) = await formatSelector(info)
+            (formats, directory, timeRange, bitRate, title) = await formatSelector(info)
             guard !formats.isEmpty else { throw YoutubeDLError.canceled }
         } else {
             bitRate = formats[0].vbr
+            title = info.safeTitle
         }
         
         pendingDownloads.append(Download(formats: [],
                                          directory: directory ?? downloadsDirectory,
-                                         safeTitle: info.safeTitle,
+                                         safeTitle: title,
                                          options: options,
                                          timeRange: timeRange,
                                          bitRate: bitRate,
@@ -745,4 +745,55 @@ extension URLSessionDownloadTask {
     var info: String {
         "\(taskDescription ?? "no task description") \(originalRequest?.value(forHTTPHeaderField: "Range") ?? "no range")"
     }
+}
+
+func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)? = nil, log: ((String, String) -> Void)? = nil) async throws {
+    let yt_dlp = try await YoutubeDL().loadPythonModule()
+    
+    let (parser, opts, all_urls, ydl_opts) = try yt_dlp.parse_options.throwing.dynamicallyCall(withKeywordArguments: ["argv": argv])
+        .tuple4
+    
+    // https://github.com/yt-dlp/yt-dlp#adding-logger-and-progress-hook
+    
+    if let log {
+        let MyLogger = PythonClass("MyLogger", members: [
+            "debug": PythonInstanceMethod { params in
+                let isDebug = String(params[1])!.hasPrefix("[debug] ")
+                log(isDebug ? "debug" : "info", String(params[1]) ?? "")
+                return Python.None
+            },
+            "info": PythonInstanceMethod { params in
+                log("info", String(params[1]) ?? "")
+                return Python.None
+            },
+            "warning": PythonInstanceMethod { params in
+                log("warning", String(params[1]) ?? "")
+                return Python.None
+            },
+            "error": PythonInstanceMethod { params in
+                log("error", String(params[1]) ?? "")
+                return Python.None
+            },
+        ])
+            .pythonObject
+        
+        ydl_opts["logger"] = MyLogger()
+    }
+    
+    if let progress {
+        let hook = PythonFunction { (d: PythonObject) in
+            let dict: [String: PythonObject] = Dictionary(d) ?? [:]
+            progress(dict)
+            return Python.None
+        }
+            .pythonObject
+        
+        ydl_opts["progress_hooks"] = [hook]
+    }
+    
+    let ydl = yt_dlp.YoutubeDL(ydl_opts)
+    
+    parser.destroy()
+    
+    try ydl.download.throwing.dynamicallyCall(withArguments: all_urls)
 }
