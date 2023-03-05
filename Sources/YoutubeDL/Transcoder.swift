@@ -32,10 +32,14 @@ public enum FFmpegError: Error {
 }
 
 open class Transcoder {
-    var progressBlock: ((Double) -> Void)?
+    open var progressBlock: ((Double) -> Void)?
+    
+    public init(progressBlock: ((Double) -> Void)? = nil) {
+        self.progressBlock = progressBlock
+    }
     
     @available(iOS 13.0, *)
-    func transcode(from: URL, to url: URL, timeRange: TimeRange?, bitRate: Double?) throws {
+    open func transcode(from: URL, to url: URL, timeRange: TimeRange?, bitRate: Double?) throws {
         let pipe = Pipe()
         Task {
             if #available(iOS 15.0, *) {

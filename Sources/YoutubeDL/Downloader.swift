@@ -51,7 +51,7 @@ open class Downloader: NSObject {
     
     let percentFormatter = NumberFormatter()
     
-    let dateComponentsFormatter = DateComponentsFormatter()
+    public let dateComponentsFormatter = DateComponentsFormatter()
     
     var t = ProcessInfo.processInfo.systemUptime
     
@@ -118,7 +118,7 @@ open class Downloader: NSObject {
     }
 }
 
-func removeItem(at url: URL) {
+public func removeItem(at url: URL) {
     do {
         try FileManager.default.removeItem(at: url)
 //        print(#function, "removed", url.lastPathComponent)

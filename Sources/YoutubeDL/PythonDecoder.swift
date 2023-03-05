@@ -8,8 +8,10 @@
 import Foundation
 import PythonKit
 
-class PythonDecoder {
-    func decode<T: Decodable>(_ type: T.Type, from pythonObject: PythonObject) throws -> T {
+open class PythonDecoder {
+    public init() {}
+    
+    open func decode<T: Decodable>(_ type: T.Type, from pythonObject: PythonObject) throws -> T {
         try T(from: _PythonDecoder(pythonObject: pythonObject, codingPath: []))
     }
 }

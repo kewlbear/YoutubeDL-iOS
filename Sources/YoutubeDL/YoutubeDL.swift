@@ -219,7 +219,7 @@ open class YoutubeDL: NSObject {
     
     public var version: String?
     
-    public lazy var downloader = Downloader.shared
+    public var downloader = Downloader.shared
     
 //    public var videoExists: Bool { FileManager.default.fileExists(atPath: Kind.videoOnly.url.path) }
     
@@ -239,7 +239,7 @@ open class YoutubeDL: NSObject {
     
     var finishedContinuation: AsyncStream<URL>.Continuation?
     
-    var keepIntermediates = false
+    open var keepIntermediates = false
     
     lazy var postDownloadTask = Task {
         for await (url, kind) in downloader.stream {
@@ -752,7 +752,8 @@ extension URLSessionDownloadTask {
     }
 }
 
-func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)? = nil, log: ((String, String) -> Void)? = nil) async throws {
+// https://github.com/yt-dlp/yt-dlp/blob/4f08e586553755ab61f64a5ef9b14780d91559a7/yt_dlp/YoutubeDL.py#L338
+public func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)? = nil, log: ((String, String) -> Void)? = nil) async throws {
     let yt_dlp = try await YoutubeDL().loadPythonModule()
     
     let (parser, opts, all_urls, ydl_opts) = try yt_dlp.parse_options.throwing.dynamicallyCall(withKeywordArguments: ["argv": argv])
@@ -796,6 +797,7 @@ func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)? = nil,
         ydl_opts["progress_hooks"] = [hook]
     }
     
+//    print(#function, ydl_opts)
     let ydl = yt_dlp.YoutubeDL(ydl_opts)
     
     parser.destroy()
