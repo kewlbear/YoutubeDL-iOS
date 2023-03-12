@@ -96,9 +96,9 @@ public struct Format: Codable {
     public var filesize: Int?
     public var format_id: String
     public var format_note: String?
-    public var fps: Int?
+    public var fps: Double?
     public var height: Int?
-    public var quality: Int?
+    public var quality: Double?
     public var tbr: Double?
     public var url: String
     public var width: Int?
