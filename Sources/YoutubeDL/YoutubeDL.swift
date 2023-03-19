@@ -26,6 +26,7 @@ import PythonSupport
 import AVFoundation
 import Photos
 import UIKit
+import FFmpegSupport
 
 // https://github.com/pvieito/PythonKit/pull/30#issuecomment-751132191
 let RTLD_DEFAULT = UnsafeMutableRawPointer(bitPattern: -2)
@@ -311,28 +312,60 @@ open class YoutubeDL: NSObject {
     func injectFakePopen() {
         runSimpleString("""
             class Pop:
-                def __init__(self, args, bufsize=-1, executable=None,
-                             stdin=None, stdout=None, stderr=None,
-                             preexec_fn=None, close_fds=True,
-                             shell=False, cwd=None, env=None, universal_newlines=None,
-                             startupinfo=None, creationflags=0,
-                             restore_signals=True, start_new_session=False,
-                             pass_fds=(), *, user=None, group=None, extra_groups=None,
-                             encoding=None, errors=None, text=None, umask=-1, pipesize=-1):
-                    raise OSError("Popen is not supported")
+                def __init__(self, *args, **kwargs):
+                    print('Popen.__init__:', self, args, kwargs)
+                    self.__args = args
             
-                def communicate(self, input=None, timeout=None):
-                    pass
-            
+                def communicate(self, *args, **kwargs):
+                    print('Popen.communicate:', self, args, kwargs)
+                    return self.ffmpeg(self, self.__args)
+
                 def kill(self):
-                    pass
+                    print('Popen.kill:', self)
 
-                def wait(self):
-                    pass
+                def wait(self, **kwargs):
+                    print('Popen.wait:', self, kwargs)
 
+                def __enter__(self):
+                    return self
+                
+                def __exit__(self, type, value, traceback):
+                    pass
+            
             import subprocess
             subprocess.Popen = Pop
             """)
+        
+        let subprocess = Python.import("subprocess")
+        subprocess.Popen.ffmpeg = PythonFunction { args in
+            print(#function, "ffmpeg", args)
+            let popen = args[0]
+            var result = Array<String?>(repeating: nil, count: 2)
+            if let args: [String] = Array(args[1][0]) {
+                let stdout = dup(STDOUT_FILENO)
+                let stderr = dup(STDERR_FILENO)
+                
+                let pipe = Pipe()
+                dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
+                dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+                
+                let exitCode = ffmpeg(args)
+                
+                dup2(stdout, STDOUT_FILENO)
+                dup2(stderr, STDERR_FILENO)
+                
+                popen.returncode = PythonObject(exitCode)
+                
+                guard let string = String(data: pipe.fileHandleForReading.availableData, encoding: .utf8) else {
+                    print(#function, "not UTF-8?")
+                    return Python.tuple(result)
+                }
+                print(#function, string)
+                result[0] = string
+                return Python.tuple(result)
+            }
+            return Python.tuple(result)
+        }.pythonObject
     }
     
     func makePythonObject(_ options: PythonObject? = nil, initializePython: Bool = true) async throws -> PythonObject {
@@ -779,6 +812,8 @@ public func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)?
             },
             "error": PythonInstanceMethod { params in
                 log("error", String(params[1]) ?? "")
+                let traceback = Python.import("traceback")
+                traceback.print_exc()
                 return Python.None
             },
         ])
@@ -798,10 +833,31 @@ public func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)?
         ydl_opts["progress_hooks"] = [hook]
     }
     
+    let MyPP = PythonClass("MyPP", superclasses: [yt_dlp.postprocessor.PostProcessor], members: [
+        "run": PythonFunction { args in
+            let `self` = args[0]
+            let info = args[1]
+            do {
+                let formats = try PythonDecoder().decode([Format].self, from: info["requested_formats"])
+                guard let vbr = formats.first(where: { $0.vbr != nil })?.vbr.map(Int.init) else {
+                    return Python.tuple([[], info])
+                }
+                self._downloader.params["postprocessor_args"]["merger+ffmpeg"].extend(["-b:v", "\(vbr)k"])
+                print(#function, "vbr:", vbr, args[0]._downloader.params)
+            } catch {
+                print(#function, error)
+            }
+//            print(#function, "MyPP.run:", info["requested_formats"])//, args)
+            return Python.tuple([[], info])
+        }
+    ]).pythonObject
+    
 //    print(#function, ydl_opts)
     let ydl = yt_dlp.YoutubeDL(ydl_opts)
     
     parser.destroy()
+    
+    ydl.add_post_processor(MyPP(), when: "before_dl")
     
     try ydl.download.throwing.dynamicallyCall(withArguments: all_urls)
 }
