@@ -299,7 +299,7 @@ open class YoutubeDL: NSObject {
         
         let sys = try Python.attemptImport("sys")
         if !(Array(sys.path) ?? []).contains(Self.pythonModuleURL.path) {
-            injectFakePopen()
+            injectFakePopen(handler: popenHandler)
             
             sys.path.insert(1, Self.pythonModuleURL.path)
         }
@@ -309,7 +309,7 @@ open class YoutubeDL: NSObject {
         return pythonModule
     }
     
-    func injectFakePopen() {
+    func injectFakePopen(handler: PythonFunction) {
         runSimpleString("""
             class Pop:
                 def __init__(self, *args, **kwargs):
@@ -318,7 +318,7 @@ open class YoutubeDL: NSObject {
             
                 def communicate(self, *args, **kwargs):
                     print('Popen.communicate:', self, args, kwargs)
-                    return self.ffmpeg(self, self.__args)
+                    return self.handler(self, self.__args)
 
                 def kill(self):
                     print('Popen.kill:', self)
@@ -337,36 +337,121 @@ open class YoutubeDL: NSObject {
             """)
         
         let subprocess = Python.import("subprocess")
-        subprocess.Popen.ffmpeg = PythonFunction { args in
-            print(#function, "ffmpeg", args)
-            let popen = args[0]
-            var result = Array<String?>(repeating: nil, count: 2)
-            if let args: [String] = Array(args[1][0]) {
-                let stdout = dup(STDOUT_FILENO)
-                let stderr = dup(STDERR_FILENO)
-                
-                let pipe = Pipe()
-                dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
-                dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
-                
-                let exitCode = ffmpeg(args)
-                
-                dup2(stdout, STDOUT_FILENO)
-                dup2(stderr, STDERR_FILENO)
-                
-                popen.returncode = PythonObject(exitCode)
-                
+        subprocess.Popen.handler = handler.pythonObject
+    }
+    
+    lazy var popenHandler = PythonFunction { args in
+        print(#function, args)
+        let popen = args[0]
+        var result = Array<String?>(repeating: nil, count: 2)
+        if var args: [String] = Array(args[1][0]) {
+            // save standard out/error
+            let stdout = dup(STDOUT_FILENO)
+            let stderr = dup(STDERR_FILENO)
+            
+            // redirect standard out/error
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            dup2(outPipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
+            dup2(errPipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+            
+            let exitCode = self.handleFFmpeg(args: args)
+            
+            // restore standard out/error
+            dup2(stdout, STDOUT_FILENO)
+            dup2(stderr, STDERR_FILENO)
+            
+            popen.returncode = PythonObject(exitCode)
+            
+            func read(pipe: Pipe) -> String? {
                 guard let string = String(data: pipe.fileHandleForReading.availableData, encoding: .utf8) else {
                     print(#function, "not UTF-8?")
-                    return Python.tuple(result)
+                    return nil
                 }
                 print(#function, string)
-                result[0] = string
-                return Python.tuple(result)
+                return string
             }
+            
+            result[0] = read(pipe: outPipe)
+            result[1] = read(pipe: errPipe)
             return Python.tuple(result)
-        }.pythonObject
+        }
+        return Python.tuple(result)
     }
+    
+    func handleFFmpeg(args: [String]) -> Int {
+        var args = args
+        
+        let pipe = Pipe()
+        defer {
+            do {
+                print(#function, "close")
+                try pipe.fileHandleForWriting.close()
+            } catch {
+                print(#function, error)
+            }
+        }
+        
+        if args.contains("-i") {
+            if let timeRange {
+                args.insert(contentsOf: [
+                    "-ss", "\(timeRange.lowerBound)",
+                    "-t", "\(timeRange.upperBound - timeRange.lowerBound)",
+                ], at: 1)
+            }
+            
+            if let progressBlock = willTranscode?() {
+                if #available(iOS 15.0, *) {
+                    let maxTime: Double
+                    if let duration {
+                        maxTime = duration * 1_000_000
+                    } else if let timeRange = timeRange {
+                        maxTime = (timeRange.upperBound - timeRange.lowerBound) * 1_000_000
+                    } else {
+                        maxTime = 1_000_000 // FIXME: probe?
+                    }
+                    
+                    var info = [String: String]()
+                    pipe.fileHandleForReading.readabilityHandler = { fileHandle in
+                        guard let string = String(data: fileHandle.availableData, encoding: .utf8) else { return }
+                        for components in string.split(separator: "\n").map({ $0.split(separator: "=") }).filter({ $0.count == 2}) {
+                            let key = String(components[0])
+                            info[key] = String(components[1])
+                            if key == "progress" {
+                                //                        print(#function, info)
+                                if let time = Int(info["out_time_us"] ?? ""),
+                                   time >= 0 { // FIXME: reset global variable(s) causing it
+                                    let progress = Double(time) / maxTime
+                                    //                                        print(#function, "progress:", progress
+                                    //                                  , info["out_time_us"] ?? "nil", time
+                                    //                                        )
+                                    progressBlock(progress)
+                                }
+                                guard info["progress"] != "end" else {
+                                    fileHandle.readabilityHandler = nil
+                                    break
+                                }
+                                info.removeAll()
+                            }
+                        }
+                        //                            print(#function, string)
+                    }
+                } else {
+                    // Fallback on earlier versions
+                }
+                
+                args.insert(contentsOf: [
+                    "-progress", "pipe:\(pipe.fileHandleForWriting.fileDescriptor)",
+                    "-nostats",
+                ], at: 1)
+            }
+        }
+        
+        print(#function, args)
+        return ffmpeg(args)
+    }
+    
+    var willTranscode: (() -> ((Double) -> Void)?)?
     
     func makePythonObject(_ options: PythonObject? = nil, initializePython: Bool = true) async throws -> PythonObject {
         let pythonModule = try await loadPythonModule()
@@ -787,8 +872,9 @@ extension URLSessionDownloadTask {
 }
 
 // https://github.com/yt-dlp/yt-dlp/blob/4f08e586553755ab61f64a5ef9b14780d91559a7/yt_dlp/YoutubeDL.py#L338
-public func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)? = nil, log: ((String, String) -> Void)? = nil) async throws {
-    let yt_dlp = try await YoutubeDL().loadPythonModule()
+public func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)? = nil, log: ((String, String) -> Void)? = nil, makeTranscodeProgressBlock: (() -> ((Double) -> Void)?)? = nil) async throws {
+    let context = YoutubeDL()
+    let yt_dlp = try await context.loadPythonModule()
     
     let (parser, opts, all_urls, ydl_opts) = try yt_dlp.parse_options.throwing.dynamicallyCall(withKeywordArguments: ["argv": argv])
         .tuple4
@@ -843,14 +929,16 @@ public func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)?
                     return Python.tuple([[], info])
                 }
                 self._downloader.params["postprocessor_args"]["merger+ffmpeg"].extend(["-b:v", "\(vbr)k"])
-                print(#function, "vbr:", vbr, args[0]._downloader.params)
+                duration = TimeInterval(info["duration"])
+                print(#function, "vbr:", vbr, "duration:", duration ?? "nil", args[0]._downloader.params)
             } catch {
                 print(#function, error)
             }
 //            print(#function, "MyPP.run:", info["requested_formats"])//, args)
             return Python.tuple([[], info])
         }
-    ]).pythonObject
+    ])
+        .pythonObject
     
 //    print(#function, ydl_opts)
     let ydl = yt_dlp.YoutubeDL(ydl_opts)
@@ -859,5 +947,11 @@ public func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)?
     
     ydl.add_post_processor(MyPP(), when: "before_dl")
     
+    context.willTranscode = makeTranscodeProgressBlock
+    
     try ydl.download.throwing.dynamicallyCall(withArguments: all_urls)
 }
+
+var timeRange: TimeRange?
+
+var duration: TimeInterval?
