@@ -92,6 +92,28 @@ final class YoutubeDL_iOSTests: XCTestCase {
         })
     }
     
+    @available(iOS 16.0, *)
+    func testJson() async throws {
+        print(FileManager.default.currentDirectoryPath)
+        var filename: String?
+        try await yt_dlp(argv: [
+            "--write-info-json",
+            "--skip-download",
+            "https://youtube.com/shorts/y6bGD7WxHIU?feature=share",
+            "--no-check-certificates",
+        ], log: { level, message in
+            print(#function, level, message)
+            if let range = message.range(of: "Writing video metadata as JSON to: ") {
+                filename = String(message[range.upperBound...])
+            }
+        })
+
+        guard let filename else { fatalError() }
+        let data = try Data(contentsOf: URL(filePath: filename))
+        let info = try JSONDecoder().decode(Info.self, from: data)
+        print(#function, info)
+    }
+                         
     static var allTests = [
         ("testExtractInfo", testExtractInfo),
     ]

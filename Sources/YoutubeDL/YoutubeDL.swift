@@ -313,7 +313,7 @@ open class YoutubeDL: NSObject {
         runSimpleString("""
             class Pop:
                 def __init__(self, *args, **kwargs):
-                    print('Popen.__init__:', self, args, kwargs)
+                    print('Popen.__init__:', self, args)#, kwargs)
                     self.__args = args
             
                 def communicate(self, *args, **kwargs):
@@ -928,9 +928,9 @@ public func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)?
                 guard let vbr = formats.first(where: { $0.vbr != nil })?.vbr.map(Int.init) else {
                     return Python.tuple([[], info])
                 }
-                self._downloader.params["postprocessor_args"]["merger+ffmpeg"].extend(["-b:v", "\(vbr)k"])
+                self._downloader.params["postprocessor_args"].checking["merger+ffmpeg"]?.extend(["-b:v", "\(vbr)k"])
                 duration = TimeInterval(info["duration"])
-                print(#function, "vbr:", vbr, "duration:", duration ?? "nil", args[0]._downloader.params)
+//                print(#function, "vbr:", vbr, "duration:", duration ?? "nil", args[0]._downloader.params)
             } catch {
                 print(#function, error)
             }
