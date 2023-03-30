@@ -183,24 +183,6 @@ open class YoutubeDL: NSObject {
         var transcodePending: Bool
     }
     
-    public static var shouldDownloadPythonModule: Bool {
-        do {
-            _ = try YoutubeDL()
-            return false
-        }
-        catch YoutubeDLError.noPythonModule {
-            return true
-        }
-        catch {
-            guard let error = error as? PythonError,
-                  case let .exception(e, _) = error,
-                  e.description == "No module named 'youtube_dl'" else { // FIXME: better way?
-                return false
-            }
-            return true
-        }
-    }
-    
     public static let latestDownloadURL = URL(string: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp")!
     
     public static var pythonModuleURL: URL = {
@@ -873,85 +855,158 @@ extension URLSessionDownloadTask {
 
 // https://github.com/yt-dlp/yt-dlp/blob/4f08e586553755ab61f64a5ef9b14780d91559a7/yt_dlp/YoutubeDL.py#L338
 public func yt_dlp(argv: [String], progress: (([String: PythonObject]) -> Void)? = nil, log: ((String, String) -> Void)? = nil, makeTranscodeProgressBlock: (() -> ((Double) -> Void)?)? = nil) async throws {
-    let context = YoutubeDL()
-    let yt_dlp = try await context.loadPythonModule()
+    let context = Context()
+    let yt_dlp = try await YtDlp(context: context)
     
-    let (parser, opts, all_urls, ydl_opts) = try yt_dlp.parse_options.throwing.dynamicallyCall(withKeywordArguments: ["argv": argv])
-        .tuple4
+    let (ydl_opts, all_urls) = try yt_dlp.parseOptions(args: argv)
     
     // https://github.com/yt-dlp/yt-dlp#adding-logger-and-progress-hook
     
     if let log {
-        let MyLogger = PythonClass("MyLogger", members: [
-            "debug": PythonInstanceMethod { params in
-                let isDebug = String(params[1])!.hasPrefix("[debug] ")
-                log(isDebug ? "debug" : "info", String(params[1]) ?? "")
-                return Python.None
-            },
-            "info": PythonInstanceMethod { params in
-                log("info", String(params[1]) ?? "")
-                return Python.None
-            },
-            "warning": PythonInstanceMethod { params in
-                log("warning", String(params[1]) ?? "")
-                return Python.None
-            },
-            "error": PythonInstanceMethod { params in
-                log("error", String(params[1]) ?? "")
-                let traceback = Python.import("traceback")
-                traceback.print_exc()
-                return Python.None
-            },
-        ])
-            .pythonObject
-        
-        ydl_opts["logger"] = MyLogger()
+        ydl_opts["logger"] = makeLogger(name: "MyLogger", log)
     }
     
     if let progress {
-        let hook = PythonFunction { (d: PythonObject) in
-            let dict: [String: PythonObject] = Dictionary(d) ?? [:]
-            progress(dict)
-            return Python.None
-        }
-            .pythonObject
-        
-        ydl_opts["progress_hooks"] = [hook]
+        ydl_opts["progress_hooks"] = [makeProgressHook(progress)]
     }
     
-    let MyPP = PythonClass("MyPP", superclasses: [yt_dlp.postprocessor.PostProcessor], members: [
-        "run": PythonFunction { args in
-            let `self` = args[0]
-            let info = args[1]
+    let myPP = yt_dlp.makePostProcessor(name: "MyPP") { pythonSelf, info in
             do {
-                let formats = try PythonDecoder().decode([Format].self, from: info["requested_formats"])
-                guard let vbr = formats.first(where: { $0.vbr != nil })?.vbr.map(Int.init) else {
-                    return Python.tuple([[], info])
+                let formats = try info.checking["requested_formats"]
+                    .map { try PythonDecoder().decode([Format].self, from: $0) }
+                guard let vbr = formats?.first(where: { $0.vbr != nil })?.vbr.map(Int.init) else {
+                    return ([], info)
                 }
-                self._downloader.params["postprocessor_args"].checking["merger+ffmpeg"]?.extend(["-b:v", "\(vbr)k"])
+                pythonSelf._downloader.params["postprocessor_args"]
+                    .checking["merger+ffmpeg"]?
+                    .extend(["-b:v", "\(vbr)k"])
+                
                 duration = TimeInterval(info["duration"])
 //                print(#function, "vbr:", vbr, "duration:", duration ?? "nil", args[0]._downloader.params)
             } catch {
                 print(#function, error)
             }
 //            print(#function, "MyPP.run:", info["requested_formats"])//, args)
-            return Python.tuple([[], info])
+            return ([], info)
         }
-    ])
-        .pythonObject
     
 //    print(#function, ydl_opts)
-    let ydl = yt_dlp.YoutubeDL(ydl_opts)
+    let ydl = yt_dlp.makeYoutubeDL(ydlOpts: ydl_opts)
     
-    parser.destroy()
-    
-    ydl.add_post_processor(MyPP(), when: "before_dl")
+    ydl.add_post_processor(myPP, when: "before_dl")
     
     context.willTranscode = makeTranscodeProgressBlock
     
     try ydl.download.throwing.dynamicallyCall(withArguments: all_urls)
 }
 
+/// Make custom logger. https://github.com/yt-dlp/yt-dlp#adding-logger-and-progress-hook
+/// - Parameters:
+///   - name: Python class name
+///   - log: closure to be called for each log messages
+/// - Returns: logger Python object
+public func makeLogger(name: String, _ log: @escaping (String, String) -> Void) -> PythonObject {
+    PythonClass(name, members: [
+        "debug": PythonInstanceMethod { params in
+            let isDebug = String(params[1])!.hasPrefix("[debug] ")
+            log(isDebug ? "debug" : "info", String(params[1]) ?? "")
+            return Python.None
+        },
+        "info": PythonInstanceMethod { params in
+            log("info", String(params[1]) ?? "")
+            return Python.None
+        },
+        "warning": PythonInstanceMethod { params in
+            log("warning", String(params[1]) ?? "")
+            return Python.None
+        },
+        "error": PythonInstanceMethod { params in
+            log("error", String(params[1]) ?? "")
+            
+            let traceback = Python.import("traceback")
+            traceback.print_exc()
+            
+            return Python.None
+        },
+    ])
+        .pythonObject()
+}
+
+public func makeProgressHook(_ progress: @escaping ([String: PythonObject]) -> Void) -> PythonObject {
+    PythonFunction { (d: PythonObject) in
+        let dict: [String: PythonObject] = Dictionary(d) ?? [:]
+        progress(dict)
+        return Python.None
+    }
+        .pythonObject
+}
+
 var timeRange: TimeRange?
 
 var duration: TimeInterval?
+
+typealias Context = YoutubeDL
+
+public class YtDlp {
+    public class YoutubeDL {
+        let ydl: PythonObject
+        
+        let urls: PythonObject
+        
+        init(ydl: PythonObject, urls: PythonObject) {
+            self.ydl = ydl
+            self.urls = urls
+        }
+    }
+    
+    let yt_dlp: PythonObject
+    
+    let context: Context
+    
+    public convenience init() async throws {
+        try await self.init(context: Context())
+    }
+    
+    init(context: Context) async throws {
+        yt_dlp = try await context.loadPythonModule()
+        self.context = context
+    }
+    
+    public func parseOptions(args: [String]) throws -> (ydlOpts: PythonObject, allURLs: PythonObject) {
+        let (parser, _, all_urls, ydl_opts) = try yt_dlp.parse_options.throwing.dynamicallyCall(withKeywordArguments: ["argv": args])
+            .tuple4
+        
+        parser.destroy()
+        
+        return (ydl_opts, all_urls)
+    }
+
+    public func makePostProcessor(name: String, run: @escaping (PythonObject, PythonObject) -> ([String], PythonObject)) -> PythonObject {
+        PythonClass(name, superclasses: [yt_dlp.postprocessor.PostProcessor], members: [
+            "run": PythonFunction { args in
+                let `self` = args[0]
+                let info = args[1]
+                let (filesToDelete, infoDict) = run(self, info)
+                return Python.tuple([filesToDelete.pythonObject, infoDict])
+            }
+        ])
+            .pythonObject()
+    }
+
+    func makeYoutubeDL(ydlOpts: PythonObject) -> PythonObject {
+        yt_dlp.YoutubeDL(ydlOpts)
+    }
+}
+
+public extension YtDlp.YoutubeDL {
+    convenience init(args: [String]) async throws {
+        let yt_dlp = try await YtDlp()
+        let (ydlOpts, allUrls) = try yt_dlp.parseOptions(args: args)
+        self.init(ydl: yt_dlp.makeYoutubeDL(ydlOpts: ydlOpts), urls: allUrls)
+    }
+    
+    func download(urls: [URL]? = nil) throws {
+        let urls = urls?.map(\.absoluteString).pythonObject ?? self.urls
+        try ydl.download.throwing.dynamicallyCall(withArguments: urls)
+    }
+}
