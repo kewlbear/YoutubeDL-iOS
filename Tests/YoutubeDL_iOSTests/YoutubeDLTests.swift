@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2021 Changbeom Ahn
+//  Copyright (c) 2023 Changbeom Ahn
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -81,7 +81,7 @@ final class YoutubeDL_iOSTests: XCTestCase {
     func testDirect() async throws {
         print(FileManager.default.currentDirectoryPath)
         try await yt_dlp(argv: [
-            "-F",
+//            "-F",
 //            "-f", "bestvideo+bestaudio[ext=m4a]/best",
             "https://m.youtube.com/watch?v=ezEYcU9Pp_w",
             "--no-check-certificates",
@@ -90,6 +90,15 @@ final class YoutubeDL_iOSTests: XCTestCase {
         }, log: { level, message in
             print(#function, level, message)
         })
+    }
+    
+    func testExtractMP3() async throws {
+        print(FileManager.default.currentDirectoryPath)
+        try await yt_dlp(argv: [
+            "-x", "--audio-format", "mp3", "--embed-thumbnail", "--add-metadata",
+            "https://youtu.be/Qc7_zRjH808",
+            "--no-check-certificates",
+        ])
     }
     
     @available(iOS 16.0, *)

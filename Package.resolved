@@ -2,12 +2,21 @@
   "object": {
     "pins": [
       {
-        "package": "FFmpeg-iOS",
-        "repositoryURL": "https://github.com/kewlbear/FFmpeg-iOS.git",
+        "package": "FFmpeg-iOS-Lame",
+        "repositoryURL": "https://github.com/kewlbear/FFmpeg-iOS-Lame",
         "state": {
           "branch": null,
-          "revision": "59c01fbba5a85005d4b624f77f6ad32d43a4d922",
-          "version": "0.0.5"
+          "revision": "c0b202a16a43933cb16bf9914c76e00f0d24d57e",
+          "version": "0.0.6-b20230416-200000"
+        }
+      },
+      {
+        "package": "FFmpeg-iOS-Support",
+        "repositoryURL": "https://github.com/kewlbear/FFmpeg-iOS-Support",
+        "state": {
+          "branch": null,
+          "revision": "60df9313af3a5869255b9654cd88eede4646295b",
+          "version": "0.0.1"
         }
       },
       {
@@ -26,15 +35,6 @@
           "branch": null,
           "revision": "81f621d094a7c8923207efe5178f50dba1b56c39",
           "version": "0.3.1"
-        }
-      },
-      {
-        "package": "swift-argument-parser",
-        "repositoryURL": "https://github.com/apple/swift-argument-parser",
-        "state": {
-          "branch": null,
-          "revision": "6b2aa2748a7881eebb9f84fb10c01293e15b52ca",
-          "version": "0.5.0"
         }
       }
     ]
