@@ -367,7 +367,7 @@ open class YoutubeDL: NSObject {
         let pipe = Pipe()
         defer {
             do {
-                print(#function, "close")
+//                print(#function, "close")
                 try pipe.fileHandleForWriting.close()
             } catch {
                 print(#function, error)
@@ -429,7 +429,7 @@ open class YoutubeDL: NSObject {
             }
         }
         
-        print(#function, args)
+//        print(#function, args)
         return args[0] == "ffmpeg" ? ffmpeg(args) : ffprobe(args)
     }
     
