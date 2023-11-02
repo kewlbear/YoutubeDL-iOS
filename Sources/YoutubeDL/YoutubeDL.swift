@@ -293,10 +293,15 @@ open class YoutubeDL: NSObject {
     
     func injectFakePopen(handler: PythonFunction) {
         runSimpleString("""
+            import errno
+            import os
+            
             class Pop:
                 def __init__(self, *args, **kwargs):
                     print('Popen.__init__:', self, args)#, kwargs)
-                    self.__args = args
+                    if args[0] in ['ffmpeg', 'ffprobe']:
+                        self.__args = args
+                    raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), args[0])
             
                 def communicate(self, *args, **kwargs):
                     print('Popen.communicate:', self, args, kwargs)
@@ -437,7 +442,8 @@ open class YoutubeDL: NSObject {
     
     func makePythonObject(_ options: PythonObject? = nil, initializePython: Bool = true) async throws -> PythonObject {
         let pythonModule = try await loadPythonModule()
-        pythonObject = pythonModule.YoutubeDL(options ?? defaultOptions)
+        let options = options ?? defaultOptions
+        pythonObject = pythonModule.YoutubeDL(options)
         self.options = options
         return pythonObject!
     }
